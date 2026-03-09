@@ -1,0 +1,24 @@
+# Build directories (trailing slash = dirs only, won't catch build.bash etc.)
+build*/
+
+# Test/run output
+*.out
+*.log
+
+# External downloaded libraries (scripts like build_ext.bash are still tracked)
+ext/opencv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
+*-checkpoint.ipynb
+
+# Editor temp files
+*~
+*.swp
+*.swo
+*.zip
