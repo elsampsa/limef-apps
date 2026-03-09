@@ -1,4 +1,4 @@
-## Example Limef apps
+# Example Limef apps
 
 Cpp and Python example apps that use Limef library.
 
@@ -20,3 +20,11 @@ cpp/
 python/
     # simple rtsp server and opencv examples in python
 ```
+
+## Copyright
+
+(c) 2026 Sampsa Riikonen
+
+## License
+
+MIT
