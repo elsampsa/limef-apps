@@ -22,3 +22,6 @@ __pycache__/
 *.swp
 *.swo
 *.zip
+
+# build artifacts
+*.deb
