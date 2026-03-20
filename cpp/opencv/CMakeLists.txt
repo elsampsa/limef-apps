@@ -13,7 +13,14 @@
 cmake_minimum_required(VERSION 3.14)
 project(LimefOpenCVApps)
 
-set(LIMEF_PREFIX "$ENV{HOME}/limef-stage" CACHE PATH "Path to limef staging prefix")
+if(EXISTS "$ENV{HOME}/limef-stage/include/limef/thread/thread.h")
+    set(_limef_prefix_default "$ENV{HOME}/limef-stage")
+elseif(EXISTS "/usr/include/limef/thread/thread.h")
+    set(_limef_prefix_default "/usr")
+else()
+    set(_limef_prefix_default "$ENV{HOME}/limef-stage")
+endif()
+set(LIMEF_PREFIX "${_limef_prefix_default}" CACHE PATH "Path to limef staging prefix")
 set(OPENCV_INSTALL "" CACHE PATH "Path to OpenCV install prefix (contains include/opencv4 and lib/)")
 
 if(NOT CMAKE_BUILD_TYPE)
