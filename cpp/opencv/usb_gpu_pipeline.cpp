@@ -24,6 +24,11 @@
  *       → GPUOpenCVThread (Gaussian blur on TensorFrame)
  *       → TensorToDecodedFrameFilter → EncodingFrameFilter(NVENC) → RTPMuxer → RTSPServer
  *
+ * NOTE: one copy could be eliminated here:
+ * DecodedToTensorFrameFilter copies DecodedFrame -> TensorFrame
+ * GPUOpenCVThread copies TensorFrame -> TensorFrame
+ * We could have a FrameFifo that copies DecodedFrame directly into a TensorFrame taken from the FrameFifo's stack
+ * 
  * Usage:
  *   ./usb_gpu_pipeline [--device /dev/video0] [--port 8554] [--width 640] [--height 480]
  *   ./usb_gpu_pipeline --modify    # enable GPU Gaussian blur
