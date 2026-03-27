@@ -1,6 +1,8 @@
 # Example Limef apps
 
-Cpp and Python example apps that use Limef library.
+Cpp and Python example apps that use [Limef library](https://elsampsa.github.io/limef-docs).
+
+For a quick showcase, take a look into [python/](python/).
 
 ## External libraries
 
