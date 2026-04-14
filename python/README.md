@@ -156,6 +156,70 @@ default; pass `--verbose` to activate them for per-frame pipeline tracing.
 
 ---
 
+## play_file.py
+
+*Play a local media file in a window*
+
+Reads a local file at its natural playback speed and presents decoded frames in
+a window.  Supports software, VAAPI and CUDA (NVDEC) decoding.  The file can be
+looped continuously or played once.
+
+`MediaFileThread` internally chains a file-reader and an `OrderedPacketBufferThread`
+(DTS ordering), so no separate buffer thread is needed.
+
+```
+python3 apps/python/play_file.py --file PATH
+                                 [--loop MS]
+                                 [--decode sw|cuda|vaapi]
+                                 [--buffer MS]
+                                 [--presenter sdl|glx]
+                                 [--bypass-compositor]
+                                 [--verbose]
+```
+
+Example:
+
+```bash
+python3 apps/python/play_file.py --file /path/to/video.mp4 --loop 0 --decode vaapi
+```
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--file PATH` | (required) | Input file |
+| `--loop MS` | -1 | Loop at EOF: pause this many ms then restart (-1 = play once, 0 = gapless) |
+| `--decode sw\|cuda\|vaapi` | `sw` | Decoder backend |
+| `--buffer MS` | 0 | Drop frames older than this many ms (0 = disabled) |
+| `--presenter sdl\|glx` | `sdl` | Window backend |
+| `--bypass-compositor` | off | (GLX only) set `_NET_WM_BYPASS_COMPOSITOR` |
+| `--verbose` | off | Print one line per frame at each stage for debugging |
+
+The process exits automatically when the file ends (no loop).
+
+### Pipeline
+
+```mermaid
+flowchart TD
+    srctr[MediaFileTR\nMediaFileThread1 +\nOrderedPacketBufTR]
+    dumpsrc(DumpFF)
+    decff(DecFF)
+    dumpdec(DumpFF)
+    pres[PresenterTR\nSDL or GLX]
+
+    srctr -->|PacketFrame| dumpsrc
+    dumpsrc --- decff
+    decff -->|DecodedFrame| dumpdec
+    dumpdec --- pres
+
+    classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
+    classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
+    class srctr,pres thread
+    class decff,dumpsrc,dumpdec ff
+```
+
+---
+
 ## usb_gpu_pipeline.py
 
 *Stream from USB camera, do GPU machine vision in Python, encode in the GPU and stream over the internet*
