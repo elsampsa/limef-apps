@@ -65,6 +65,97 @@ Audio frames and `StreamFrame`s are forwarded unchanged.
 
 ---
 
+## rtsp_client.py
+
+*Connect to an RTSP / IP camera and display the stream in a window*
+
+Connects to any RTSP source (IP camera, re-streamer, etc.), decodes the stream,
+and presents it in a window.  Reconnects automatically on stream loss.  Supports
+software, VAAPI and CUDA (NVDEC) decoding.  Timestamps are derived from the
+stream's own PTS progression anchored to wall-clock at connect time (`t0+PTS_delta`)
+— safe for all cameras.  Pass `--use-ntp` to use NTP wallclock from RTCP Sender
+Reports instead (only if the camera's NTP is known to be reliable).
+
+```
+python3 apps/python/rtsp_client.py --rtsp RTSP_URL
+                                   [--timeout SECS]
+                                   [--use-ntp]
+                                   [--decode sw|cuda|vaapi]
+                                   [--buffer MS]
+                                   [--presenter sdl|glx]
+                                   [--bypass-compositor]
+                                   [--verbose]
+```
+
+Example:
+
+```bash
+python3 apps/python/rtsp_client.py \
+    --rtsp rtsp://admin:pass@192.168.1.10/stream \
+    --decode cuda \
+    --buffer 200
+```
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--rtsp URL` | (required) | RTSP URL |
+| `--timeout SECS` | 5 | Read timeout before reconnect |
+| `--use-ntp` | off | Use NTP wall-clock from RTCP Sender Reports (only if camera NTP is reliable) |
+| `--decode sw\|cuda\|vaapi` | `sw` | Decoder backend |
+| `--buffer MS` | 0 | De-jitter tolerance in ms (see note below) |
+| `--presenter sdl\|glx` | `sdl` | Window backend: SDL2 (default) or GLX/OpenGL (CUDA zero-copy) |
+| `--bypass-compositor` | off | (GLX only) set `_NET_WM_BYPASS_COMPOSITOR` — needed on KWin/PRIME |
+| `--verbose` | off | Print one line per frame at each pipeline stage for debugging |
+
+**`--buffer` note:** maps to `PresenterContext.max_age_ms`.  Frames whose
+absolute timestamp is older than this are dropped by the presenter, allowing the
+display to catch up after a jitter burst.  `0` (default) keeps all frames.
+A value of 100–200 ms is a good starting point for cameras with moderate network
+jitter.  The `OrderedPacketBufferThread` holds a fixed 30-frame DTS-ordered queue
+upstream of the decoder to absorb packet reordering; that is separate from this
+tolerance.
+
+**`--presenter` note:** `sdl` (default) works on any display setup.  `glx` uses
+OpenGL/GLX; on NVIDIA hardware with `--decode cuda` it enables zero-copy
+`cudaGraphicsGLRegisterImage` so decoded frames never touch the CPU.  Use
+`--bypass-compositor` with GLX on KWin + PRIME (NVIDIA render offload) to prevent
+the compositor from re-compositing through Mesa.
+
+### Pipeline
+
+```mermaid
+flowchart TD
+    livetr[LiveStreamTR]
+    dumplive(DumpFF)
+    buftr[OrderedPacketBufTR]
+    dumpbuf(DumpFF)
+    decff(DecFF)
+    dumpdec(DumpFF)
+    pres[PresenterTR\nSDL or GLX]
+
+    livetr -->|PacketFrame| dumplive
+    dumplive --- buftr
+    buftr -->|PacketFrame DTS-ordered| dumpbuf
+    dumpbuf --- decff
+    decff -->|DecodedFrame| dumpdec
+    dumpdec --- pres
+
+    classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
+    classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
+    class livetr,buftr,pres thread
+    class decff,dumplive,dumpbuf,dumpdec ff
+```
+
+`LiveStreamThread` opens the RTSP URL and reconnects with exponential back-off on
+failure.  `OrderedPacketBufferThread` re-orders packets by DTS before they reach
+the decoder — important for cameras that send audio and video packets interleaved
+out of order.  The three `DumpFrameFilter` nodes are silent pass-throughs by
+default; pass `--verbose` to activate them for per-frame pipeline tracing.
+
+---
+
 ## usb_gpu_pipeline.py
 
 *Stream from USB camera, do GPU machine vision in Python, encode in the GPU and stream over the internet*
