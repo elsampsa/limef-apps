@@ -50,6 +50,11 @@ class CPUBlock:
 
     output is a DumpFrameFilter that serves as the convergence point.
     Set verbose=True to see every frame that leaves this block.
+
+    TensorThread fifo: default stack_size=5, leaky=False.
+    5 slots are sufficient at camera frame rate (no burst source).
+    leaky=False: back-pressure is preferred here — if a thread stalls,
+    we want to notice rather than silently drop frames.
     """
 
     def __init__(self, name, verbose=False):
@@ -97,6 +102,11 @@ class GPUBlock:
         0 → output              (skip: straight to block output)
         1 → p1 TensorTR → output
         2 → p2 TensorTR → output
+
+    TensorThread fifo: default stack_size=5, leaky=False.
+    Same reasoning as CPUBlock — camera rate is steady, 5 slots is ample.
+    hw_accel=CUDA triggers an H2D upload at the thread boundary so downstream
+    code always sees CUDA tensors regardless of what the upstream block emits.
     """
 
     def __init__(self, name, verbose=False):

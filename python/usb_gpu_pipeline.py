@@ -35,14 +35,9 @@ Press Ctrl+C to stop.
 """
 
 import sys
-import os
 import time
 import argparse
 import threading
-from pathlib import Path
-
-_repo_root = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(_repo_root / 'build_dev' / 'lib'))
 
 import limef
 
@@ -121,8 +116,15 @@ def main():
 
     # ── TensorPythonInterface — Python visits here ─────────────────────────────
     # GPU TensorFrames arrive via pull(); Python may process and must push() back.
+    #
+    # TensorPythonInterface fifo: stack_size=10, leaky=True, hw_accel=CUDA
+    #   10 TensorFrame slots absorb a pull() delay in the Python consumer loop.
+    #   leaky=True: drop GPU frames if the Python loop falls behind rather than
+    #   stalling the camera → upload → d2t chain.
+    #   hw_accel=CUDA: CPU TensorFrames are uploaded to the GPU at the thread
+    #   boundary (H2D copy) before they become available from pull().
     pyf    = limef.TensorPythonInterface(stack_size=10, leaky=True,
-                                         hw_accel=limef.HWACCEL_CUDA)
+                                         hw_accel=limef.HWACCEL_CUDA, fifo_size=0)
     client = pyf.client()
 
     # ── C++ downstream chain (after Python visit) ──────────────────────────────
@@ -140,7 +142,10 @@ def main():
 
     encoder   = limef.EncodingFrameFilter('encoder', enc_params)
     rtp_muxer = limef.RTPMuxerFrameFilter('rtp-muxer')
-    rtsp      = limef.RTSPServerThread('rtsp-server', port=port)
+    # stack_size=30: absorbs I-frame bursts (several RTP packets in rapid succession).
+    # fifo_size=100: cap on queued RTP packets; prevents unbounded growth under slow clients.
+    # leaky is always False for RTSPServerThread — RTP sequence gaps corrupt the stream.
+    rtsp      = limef.RTSPServerThread('rtsp-server', port=port, stack_size=30, fifo_size=100)
 
     # ── Wire the pipeline ──────────────────────────────────────────────────────
     # camera → upload → d2t → [Python] → t2d → encoder → rtp → rtsp

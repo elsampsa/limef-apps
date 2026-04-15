@@ -24,17 +24,11 @@ OpenCV is optional (install with pip install opencv-python).
 Without it, frames are passed through without blurring.
 """
 
-import sys
 import os
 import time
 import argparse
 import threading
 from pathlib import Path
-
-# Resolve build_dev/lib relative to this file so the script works from any cwd
-_repo_root = Path(__file__).resolve().parent.parent.parent
-# print(">>>", _repo_root)
-sys.path.insert(0, str(_repo_root / 'build_dev' / 'lib'))
 
 import limef
 import numpy as np
@@ -45,19 +39,14 @@ try:
 except ImportError:
     _CV2 = False
 
-_DEFAULT_MEDIA = (
-    os.environ.get('MEDIA_FILE') or
-    str(_repo_root / 'fixtures' / 'jontxu_k1_sec.mkv')
-)
-
 
 def main():
     p = argparse.ArgumentParser(
         description='limef RTSP server with Python frame processing (Gaussian blur)',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument('-f', '--file',     default=None, metavar='PATH',
-                   help='media file to stream')
+    p.add_argument('-f', '--file',     default=os.environ.get('MEDIA_FILE'), metavar='PATH',
+                   help='media file to stream (or set $MEDIA_FILE)')
     p.add_argument('-p', '--port',     type=int, default=8554,
                    help='RTSP server port')
     p.add_argument('--url-tail',       default='/live/stream', metavar='PATH',
@@ -71,7 +60,9 @@ def main():
     if not _CV2:
         print("WARNING: opencv-python not found — blur step will be skipped (pip install opencv-python)")
 
-    media_file = str(Path(args.file or _DEFAULT_MEDIA).resolve())
+    if not args.file:
+        p.error('--file PATH is required (or set $MEDIA_FILE)')
+    media_file = str(Path(args.file).resolve())
     port       = args.port
     url_tail   = args.url_tail
     SLOT       = 1
@@ -89,8 +80,13 @@ def main():
 
     # ── Upstream filter chain ──────────────────────────────────────────────────
     # MediaFileThread → decode → scale_bgr → pyf.getInput()
+    #
+    # PythonInterface fifo: stack_size=10, leaky=True
+    #   10 DecodedFrame slots are enough to absorb a pull() delay in the Python
+    #   consumer loop.  leaky=True: drop frames if the Python thread falls behind
+    #   rather than stalling the upstream decode/scale chain.
     dumpu = limef.DumpFrameFilter("upstream_dump")
-    pyf    = limef.PythonInterface(stack_size=10, leaky=True)
+    pyf    = limef.PythonInterface(stack_size=10, leaky=True, fifo_size=0)
     scale  = limef.SwScaleFrameFilter('scale_bgr', limef.AV_PIX_FMT_BGR24)
     decode = limef.DecodingFrameFilter('decode')
     decode.cc(scale).cc(pyf.getInput())
@@ -115,7 +111,10 @@ def main():
 
     encode    = limef.EncodingFrameFilter('encode', enc_params)
     rtp_muxer = limef.RTPMuxerFrameFilter('rtp_muxer')
-    rtsp      = limef.RTSPServerThread('rtsp_server', port=port)
+    # stack_size=30: absorbs I-frame bursts (several RTP packets in rapid succession).
+    # fifo_size=100: cap on queued RTP packets; prevents unbounded growth under slow clients.
+    # leaky is always False for RTSPServerThread — RTP sequence gaps corrupt the stream.
+    rtsp      = limef.RTSPServerThread('rtsp_server', port=port, stack_size=30, fifo_size=100)
     
     # pyf.getOutput().cc(scale_yuv).cc(encode).cc(rtp_muxer).cc(dumpd).cc(rtsp.getInput())
     pyf.getOutput().cc(scale_yuv).cc(encode).cc(rtp_muxer).cc(rtsp.getInput())

@@ -133,14 +133,14 @@ flowchart TD
     dumpbuf(DumpFF)
     decff(DecFF)
     dumpdec(DumpFF)
-    pres[PresenterTR\nSDL or GLX]
+    pres[PresenterTR SDL/GLX]
 
-    livetr -->|PacketFrame| dumplive
-    dumplive --- buftr
-    buftr -->|PacketFrame DTS-ordered| dumpbuf
+    livetr ---|PacketFrame| dumplive
+    dumplive --> buftr
+    buftr ---|PacketFrame DTS-ordered| dumpbuf
     dumpbuf --- decff
-    decff -->|DecodedFrame| dumpdec
-    dumpdec --- pres
+    decff ---|DecodedFrame| dumpdec
+    dumpdec --> pres
 
     classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
     classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
@@ -201,16 +201,16 @@ The process exits automatically when the file ends (no loop).
 
 ```mermaid
 flowchart TD
-    srctr[MediaFileTR\nMediaFileThread1 +\nOrderedPacketBufTR]
+    srctr[MediaFileTR]
     dumpsrc(DumpFF)
     decff(DecFF)
     dumpdec(DumpFF)
-    pres[PresenterTR\nSDL or GLX]
+    pres[PresenterTR SDL/GLX]
 
-    srctr -->|PacketFrame| dumpsrc
+    srctr ---|PacketFrame| dumpsrc
     dumpsrc --- decff
-    decff -->|DecodedFrame| dumpdec
-    dumpdec --- pres
+    decff ---|DecodedFrame| dumpdec
+    dumpdec --> pres
 
     classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
     classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff

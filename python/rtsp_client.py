@@ -34,15 +34,8 @@ Options:
 Press Ctrl+C to stop.
 """
 
-import sys
 import time
 import argparse
-from pathlib import Path
-
-# Allow running from any directory after sourcing go_debug.bash (PYTHONPATH is set).
-# If running directly from the repo, add the debug build to sys.path as a fallback.
-_repo_root = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(_repo_root / 'build_debug' / 'lib'))
 
 import limef
 
@@ -109,7 +102,9 @@ def main():
         pctx.max_age_ms         = args.buffer
         pctx.max_future_age_ms  = MAX_FUTURE_AGE_MS
         pctx.bypass_compositor  = args.bypass_compositor
-        presenter = limef.GLXPresenterThread('presenter', pctx=pctx)
+        presenter = limef.GLXPresenterThread('presenter', pctx=pctx,
+                        stack_size=20,  # a few screen-refresh cycles of headroom
+                        fifo_size=40)   # evict oldest if display falls behind a burst
     else:
         # SDLVideoPresenterThread: simpler, cross-platform, no GLX/EGL setup.
         # GPU frames are downloaded to CPU before display — no zero-copy path.
@@ -120,21 +115,46 @@ def main():
             'presenter',
             max_age_ms=args.buffer,
             max_future_age_ms=MAX_FUTURE_AGE_MS,
+            stack_size=20,  # a few screen-refresh cycles of headroom
+            fifo_size=40,   # evict oldest if display falls behind a burst
         )
 
     # ── Build filter chain ─────────────────────────────────────────────────────
     #
     #   live → dump_live → buf → dump_buf → dec → dump_dec → presenter
     #
+    # Each consumer thread owns a FrameFifo (stack + fifo).  Key parameters:
+    #
+    #   stack_size: number of pre-allocated Frame slots.  The Frame *objects* are
+    #       created upfront, but their data buffers (AVPacket payload, pixel planes)
+    #       grow lazily on first use and are then reused.  So memory footprint
+    #       stabilises after ~1 GOP, not at construction time.
+    #       The stack is a hard cap on frames in flight; when exhausted the thread
+    #       either drops (leaky=True) or blocks upstream (leaky=False).
+    #
+    #   leaky: for live streaming, drop rather than block — a missed display frame
+    #       is acceptable; stalling the source thread is not.
+    #       Exception: RTSPServerThread uses leaky=False because RTP is
+    #       sequence-numbered and every dropped packet corrupts the stream.
+    #
     # buf: OrderedPacketBufferThread
-    #   stack_size=30: enough for one full GOP at typical frame rates (25–60 fps).
-    #   leaky=True: live streaming — drop oldest packet rather than blocking the
-    #   source thread when the buffer is full (e.g. during a decode stall).
+    #   stack_size=30: capacity for one full GOP at 25–60 fps plus network jitter.
+    #   leaky=True: if the decoder stalls, drop incoming packets rather than
+    #       blocking LiveStreamThread.
+    #
+    # presenter: DecodedFrame fifo (leaky=True, stack=20, fifo cap=40)
+    #   stack_size=20: a few screen-refresh cycles of headroom (~667 ms at 30 fps).
+    #   fifo_size=40:  hard cap on queued-but-not-yet-displayed frames; oldest is
+    #       evicted when full so memory stays bounded under a decode burst.
+    #   Both values are set via stack_size= on the presenter constructor.
     #
     # DumpFrameFilters are always in the chain; verbose=False makes them silent
     # pass-throughs with no overhead.  Use --verbose to activate all three.
     dump_live = limef.DumpFrameFilter('dump_live', verbose=args.verbose)
-    buf       = limef.OrderedPacketBufferThread('buf', stack_size=30, leaky=True)
+    buf       = limef.OrderedPacketBufferThread('buf',
+                    stack_size=30,   # one GOP at 25-60 fps
+                    leaky=True,      # drop if decoder stalls rather than blocking live source
+                    fifo_size=0)     # unlimited queue; back-pressure via stack only
     dump_buf  = limef.DumpFrameFilter('dump_buf',  verbose=args.verbose)
     dec       = limef.DecodingFrameFilter('dec', hw_accel=_DECODE_MAP[args.decode])
     dump_dec  = limef.DumpFrameFilter('dump_dec',  verbose=args.verbose)

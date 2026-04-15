@@ -58,6 +58,11 @@ class CPUBlock:
 
     p1 keeps only the red channel (zeros G and B).
     p2 keeps only the green channel (zeros R and B).
+
+    TensorPythonInterface fifo: stack_size=10, leaky=True, hw_accel=SW.
+    10 CPU TensorFrame slots absorb a pull() delay in the Python thread.
+    leaky=True: drop frames if the Python thread falls behind rather than
+    stalling the upstream camera chain.
     """
 
     def __init__(self, name, verbose=False):
@@ -68,9 +73,9 @@ class CPUBlock:
         self.output = limef.DumpFrameFilter(f"{name}_out", verbose=verbose)
 
         self.p1 = limef.TensorPythonInterface(stack_size=10, leaky=True,
-                                               hw_accel=limef.HWACCEL_SW)
+                                               hw_accel=limef.HWACCEL_SW, fifo_size=0)
         self.p2 = limef.TensorPythonInterface(stack_size=10, leaky=True,
-                                               hw_accel=limef.HWACCEL_SW)
+                                               hw_accel=limef.HWACCEL_SW, fifo_size=0)
         self._c1 = self.p1.client()
         self._c2 = self.p2.client()
 
@@ -158,6 +163,10 @@ class GPUBlock:
 
     p1 keeps only the blue channel (zeros R and G).
     p2 converts to greyscale (BW) by averaging R, G, B.
+
+    TensorPythonInterface fifo: stack_size=10, leaky=True, hw_accel=CUDA.
+    Same rationale as CPUBlock.  hw_accel=CUDA triggers a CPU→CUDA H2D
+    upload at the thread boundary so pull() always returns GPU tensors.
     """
 
     def __init__(self, name, verbose=False):
@@ -171,9 +180,9 @@ class GPUBlock:
         self.output = limef.DumpFrameFilter(f"{name}_out", verbose=verbose)
 
         self.p1 = limef.TensorPythonInterface(stack_size=10, leaky=True,
-                                               hw_accel=hw)
+                                               hw_accel=hw, fifo_size=0)
         self.p2 = limef.TensorPythonInterface(stack_size=10, leaky=True,
-                                               hw_accel=hw)
+                                               hw_accel=hw, fifo_size=0)
         self._c1 = self.p1.client()
         self._c2 = self.p2.client()
 
@@ -328,11 +337,17 @@ t2d = limef.TensorToDecodedFrameFilter("t2d")
 # SplitFrameFilter fans out DecodedFrames to display and encoder in parallel.
 split = limef.SplitFrameFilter("split")
 
+# GLXPresenterThread fifo: default stack_size=20, leaky=True, fifo cap=40.
+# 20 DecodedFrame slots cover a few screen-refresh cycles of headroom.
+# leaky=True: drop a display frame rather than stalling the encoder branch.
+# Tunable via stack_size= if needed.
 pctx                    = limef.PresenterContext()
 pctx.width              = 640
 pctx.height             = 480
 pctx.bypass_compositor  = True   # required on KWin + PRIME/GLX
-glx = limef.GLXPresenterThread("glx", pctx)
+glx = limef.GLXPresenterThread("glx", pctx,
+          stack_size=20,  # a few screen-refresh cycles of headroom
+          fifo_size=40)   # evict oldest if display falls behind a burst
 
 # ── Camera source ─────────────────────────────────────────────────────────────
 

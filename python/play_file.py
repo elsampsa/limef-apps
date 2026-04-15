@@ -32,15 +32,8 @@ Options:
 Press Ctrl+C to stop.
 """
 
-import sys
 import time
 import argparse
-from pathlib import Path
-
-# Allow running from any directory after sourcing go_debug.bash (PYTHONPATH is set).
-# If running directly from the repo, add the debug build to sys.path as a fallback.
-_repo_root = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(_repo_root / 'build_debug' / 'lib'))
 
 import limef
 
@@ -91,21 +84,34 @@ def main():
         pctx = limef.PresenterContext()
         pctx.max_age_ms        = args.buffer
         pctx.bypass_compositor = args.bypass_compositor
-        presenter = limef.GLXPresenterThread('presenter', pctx=pctx)
+        presenter = limef.GLXPresenterThread('presenter', pctx=pctx,
+                        stack_size=20,  # a few screen-refresh cycles of headroom
+                        fifo_size=40)   # evict oldest if display falls behind a burst
     else:
         if args.bypass_compositor:
             print("WARNING: --bypass-compositor is only applicable with --presenter glx, ignoring.")
         presenter = limef.SDLVideoPresenterThread(
             'presenter',
             max_age_ms=args.buffer,
+            stack_size=20,  # a few screen-refresh cycles of headroom
+            fifo_size=40,   # evict oldest if display falls behind a burst
         )
 
     # ── Build filter chain ─────────────────────────────────────────────────────
     #
     #   src → dump_src → dec → dump_dec → presenter
     #
-    # MediaFileThread already includes an internal OrderedPacketBufferThread,
-    # so no separate buf thread is needed.
+    # MediaFileThread already contains an internal OrderedPacketBufferThread
+    # (stack_size=30, leaky=False) so no separate buf thread is needed here.
+    # Back-pressure is intentional for file playback: the source must never
+    # outrun the decoder.
+    #
+    # presenter: DecodedFrame fifo (leaky=True, stack=20, fifo cap=40)
+    #   stack_size=20: a few screen-refresh cycles of headroom.  For file playback
+    #   the decoder feeds at a steady rate, so 20 slots is ample.
+    #   fifo_size=40:  hard cap on queued-but-not-yet-displayed frames so memory
+    #   stays bounded if the display momentarily falls behind; oldest is evicted.
+    #   Tunable via stack_size= on the presenter constructor if needed.
     #
     # DumpFrameFilters are always in the chain; verbose=False makes them silent
     # pass-throughs with no overhead.  Use --verbose to activate both.
@@ -138,12 +144,12 @@ def main():
     src.start()
 
     # ── Main loop ──────────────────────────────────────────────────────────────
+    # Note: src.isRunning() stays True even after EOF because MediaFileThread is a
+    # ComposeThread whose second sub-thread (OrderedPacketBufferThread) never stops
+    # on its own — it blocks waiting for more input indefinitely.  Press Ctrl+C to stop.
     try:
         while True:
             time.sleep(0.5)
-            # Stop naturally when the file ends (no loop) and src is done.
-            if not src.isRunning():
-                break
     except KeyboardInterrupt:
         print("\nShutting down...")
 
