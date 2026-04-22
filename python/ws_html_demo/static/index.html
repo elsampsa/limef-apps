@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Limef Live Stream</title>
+    <style>
+        body { margin: 0; background: #111; color: #eee; font-family: monospace; }
+        #wrap { display: flex; flex-direction: column; align-items: center; padding: 1em; }
+        video { max-width: 100%; background: #000; }
+        #status  { margin-top: 0.5em; font-size: 0.85em; color: #aaa; }
+        #logbox  { margin-top: 0.5em; width: 90vw; max-width: 900px; height: 180px;
+                   background: #1a1a1a; border: 1px solid #444; overflow-y: auto;
+                   font-size: 0.75em; padding: 4px; }
+        #logbox p { margin: 0; padding: 0; line-height: 1.4; }
+        .log-rx   { color: #8cf; }
+        .log-ok   { color: #8fc; }
+        .log-skip { color: #fa8; }
+        .log-err  { color: #f55; }
+        .log-info { color: #aaa; }
+    </style>
+</head>
+<body>
+<div id="wrap">
+    <video id="livestream" height="480" controls autoplay muted preload="auto"></video>
+    <p>
+        <input type="checkbox" id="greedy" checked>
+        <label for="greedy">Greedy / low-latency</label>
+    </p>
+    <p id="status">[connecting…]</p>
+    <div id="logbox"></div>
+</div>
+
+<script>
+"use strict";
+
+const video    = document.getElementById("livestream");
+const checkbox = document.getElementById("greedy");
+const status   = document.getElementById("status");
+const logbox   = document.getElementById("logbox");
+
+// ── on-screen log ─────────────────────────────────────────────────────────────
+
+const MAX_LOG_LINES = 200;
+var   log_lines = 0;
+
+function log(cls, msg) {
+    const p = document.createElement("p");
+    p.className = cls;
+    p.textContent = msg;
+    logbox.appendChild(p);
+    log_lines++;
+    if (log_lines > MAX_LOG_LINES) logbox.removeChild(logbox.firstChild);
+    logbox.scrollTop = logbox.scrollHeight;
+    console.log(`[${cls}] ${msg}`);
+}
+
+// ── queue ─────────────────────────────────────────────────────────────────────
+
+var queue      = [];
+var queue_sum  = 0;
+const QUEUE_MAX = 10 * 1024 * 1024;
+
+var counter              = 0;
+var load_callback_active = false;
+var not_yet_started      = true;
+var fatal_error          = false;
+var format               = null;   // "fmp4" | "webm" — detected on first packet
+
+// fMP4 passthrough: 0=wait-ftyp  1=wait-moov  2=wait-keyframe-moof  3=streaming
+// WebM  passthrough: 0=wait-init                                      3=streaming
+var passthrough = 0;
+
+const MAX_LAG         = 3;
+const PREROLL_PACKETS = 20;
+
+var ms;
+var sourceBuffer;
+var ws;
+
+// ── format detection ──────────────────────────────────────────────────────────
+
+// First 4 bytes of an EBML header (WebM init segment).
+function isEBMLInit(view) {
+    return view[0]===0x1A && view[1]===0x45 && view[2]===0xDF && view[3]===0xA3;
+}
+// First 4 bytes of a WebM Cluster element.
+function isCluster(view) {
+    return view[0]===0x1F && view[1]===0x43 && view[2]===0xB6 && view[3]===0x75;
+}
+
+// ── fMP4 box helpers ──────────────────────────────────────────────────────────
+
+function toInt32BE(arr, idx) {
+    return new DataView(arr.buffer, arr.byteOffset).getInt32(idx, false);
+}
+
+function boxName(arr, idx) {
+    return String.fromCharCode(arr[idx], arr[idx+1], arr[idx+2], arr[idx+3]);
+}
+
+function findChildBox(arr, name, childrenStart) {
+    const total = toInt32BE(arr, 0);
+    let i = childrenStart;
+    while (i + 8 <= total && i < arr.length) {
+        const l = toInt32BE(arr, i);
+        if (l <= 0 || i + l > total) break;
+        if (boxName(arr, i + 4) === name) return arr.slice(i, i + l);
+        i += l;
+    }
+    return null;
+}
+
+function getSubBox(arr, name) { return findChildBox(arr, name, 8); }
+
+function parseAvcCodecString(moovArr) {
+    const trak = getSubBox(moovArr, "trak");  if (!trak) { log("log-err","avcC: trak not found"); return null; }
+    const mdia = getSubBox(trak,    "mdia");  if (!mdia) { log("log-err","avcC: mdia not found"); return null; }
+    const minf = getSubBox(mdia,    "minf");  if (!minf) { log("log-err","avcC: minf not found"); return null; }
+    const stbl = getSubBox(minf,    "stbl");  if (!stbl) { log("log-err","avcC: stbl not found"); return null; }
+    const stsd = findChildBox(stbl, "stsd", 8);   if (!stsd) { log("log-err","avcC: stsd not found"); return null; }
+    const avc1 = findChildBox(stsd, "avc1", 16);  if (!avc1) { log("log-err","avcC: avc1 not found"); return null; }
+    const avcC = findChildBox(avc1, "avcC", 86);  if (!avcC) { log("log-err","avcC: avcC not found"); return null; }
+    if (avcC.length < 12) { log("log-err", `avcC too short: ${avcC.length} B`); return null; }
+    const hex = (b) => b.toString(16).padStart(2, '0');
+    const str = `avc1.${hex(avcC[9])}${hex(avcC[10])}${hex(avcC[11])}`;
+    log("log-info", `avcC → codec="${str}"`);
+    return str;
+}
+
+function hasFirstSampleFlag(moofArr) {
+    const traf = getSubBox(moofArr, "traf");
+    if (!traf) return false;
+    const trun = getSubBox(traf, "trun");
+    if (!trun || trun.length < 12) return false;
+    return (trun[11] & 0x04) !== 0;
+}
+
+// ── lazy SourceBuffer creation ────────────────────────────────────────────────
+
+function createSourceBuffer(fmt) {
+    let mime;
+    if (fmt === "webm") {
+        mime = 'video/webm;codecs="vp8"';
+        if (!MediaSource.isTypeSupported(mime)) {
+            mime = 'video/webm;codecs="vp9"';
+        }
+    } else {
+        mime = 'video/mp4;codecs="avc1.640028"';
+    }
+
+    if (!MediaSource.isTypeSupported(mime)) {
+        log("log-err", `codec not supported: ${mime}`);
+        status.textContent = "codec not supported";
+        return false;
+    }
+    log("log-info", `addSourceBuffer: ${mime}`);
+    sourceBuffer = ms.addSourceBuffer(mime);
+    sourceBuffer.mode = "sequence";
+    sourceBuffer.addEventListener("updateend", loadPacket);
+    return true;
+}
+
+// ── reconnect logic ───────────────────────────────────────────────────────────
+
+function reconnect() {
+    log("log-err", "Fatal MSE error — reconnecting in 2 s");
+    status.textContent = "MSE error — reconnecting…";
+    setTimeout(startup, 2000);
+}
+
+// ── WebSocket → queue ─────────────────────────────────────────────────────────
+
+function pushPacket(arr) {
+    if (fatal_error) return;
+
+    queue_sum += arr.byteLength;
+    while (queue_sum >= QUEUE_MAX && queue.length > 0) {
+        const dropped = queue.shift();
+        queue_sum -= dropped.byteLength;
+        log("log-err", `queue overflow: dropped ${dropped.byteLength} B`);
+    }
+    queue.push(arr);
+
+    if (!load_callback_active) loadPacket();
+
+    if (checkbox.checked && !video.paused && counter > PREROLL_PACKETS) {
+        if (video.buffered.length > 0) {
+            const lag = video.buffered.end(0) - video.currentTime;
+            if (lag > MAX_LAG) {
+                video.currentTime = video.buffered.end(0);
+            }
+        }
+    }
+
+    if (counter > PREROLL_PACKETS && not_yet_started) {
+        not_yet_started = false;
+        if (video.paused) video.play().catch(() => {});
+    }
+}
+
+// ── queue → SourceBuffer ──────────────────────────────────────────────────────
+
+function loadPacket() {
+    if (fatal_error) return;
+
+    // Lazy SourceBuffer creation: detect format from first queued packet.
+    if (!sourceBuffer) {
+        if (!ms || ms.readyState !== "open" || queue.length === 0) {
+            load_callback_active = false;
+            return;
+        }
+        const peek = new Uint8Array(queue[0]);
+        format = isEBMLInit(peek) ? "webm" : "fmp4";
+        log("log-info", `detected format: ${format}`);
+        if (!createSourceBuffer(format)) {
+            fatal_error = true;
+            return;
+        }
+    }
+
+    if (sourceBuffer.updating) return;
+
+    // Trim buffer if it grows too long.
+    if (sourceBuffer.buffered.length > 0) {
+        const span = sourceBuffer.buffered.end(0) - sourceBuffer.buffered.start(0);
+        if (span > 60) {
+            sourceBuffer.remove(sourceBuffer.buffered.start(0),
+                                sourceBuffer.buffered.start(0) + 10);
+            return;
+        }
+    }
+
+    if (queue.length === 0) {
+        load_callback_active = false;
+        return;
+    }
+
+    const inp  = queue.shift();
+    queue_sum -= inp.byteLength;
+    const view = new Uint8Array(inp);
+
+    // ── WebM passthrough ──────────────────────────────────────────────────────
+    if (format === "webm") {
+        if (isEBMLInit(view) && passthrough === 0) {
+            passthrough = 3;
+            log("log-ok", `EBML init ${inp.byteLength} B → streaming`);
+        } else if (isCluster(view) && passthrough >= 3) {
+            log("log-rx", `CLUSTER ${inp.byteLength} B  queue=${queue.length}`);
+        } else if (passthrough < 3) {
+            log("log-skip", `WebM ${inp.byteLength} B → skipped (no init yet)`);
+            loadPacket();
+            return;
+        }
+
+    // ── fMP4 passthrough ──────────────────────────────────────────────────────
+    } else {
+        const name = boxName(view, 4);
+        log("log-rx", `rx  ${name}  ${inp.byteLength} B  passthrough=${passthrough}  queue=${queue.length}`);
+
+        if (name === "ftyp" && passthrough === 0) {
+            passthrough = 1;
+            log("log-ok", "ftyp → accepted, waiting for moov");
+
+        } else if (name === "moov" && passthrough === 1) {
+            const codec = parseAvcCodecString(view);
+            passthrough = 2;
+            log("log-ok", "moov → accepted, waiting for keyframe moof");
+
+        } else if (name === "moof" && passthrough === 2) {
+            const isKey = hasFirstSampleFlag(view);
+            log(isKey ? "log-ok" : "log-skip",
+                `moof  first-sample-flags=${isKey}  ${isKey ? "→ accepted, streaming" : "→ skipped (not keyframe)"}`);
+            if (isKey) {
+                passthrough = 3;
+            } else {
+                if (queue.length > 0) {
+                    const peek = new Uint8Array(queue[0]);
+                    if (boxName(peek, 4) === "mdat") {
+                        const mdat = queue.shift();
+                        queue_sum -= mdat.byteLength;
+                        log("log-skip", `mdat  ${mdat.byteLength} B  → skipped (paired with non-keyframe moof)`);
+                    }
+                }
+                loadPacket();
+                return;
+            }
+
+        } else if (passthrough < 3) {
+            log("log-skip", `${name}  ${inp.byteLength} B  → skipped (passthrough=${passthrough})`);
+            loadPacket();
+            return;
+        }
+    }
+
+    // ── append ────────────────────────────────────────────────────────────────
+    try {
+        sourceBuffer.appendBuffer(inp);
+        load_callback_active = true;
+        counter++;
+        if (counter % 50 === 0) {
+            const r = sourceBuffer.buffered;
+            status.textContent = `pkt ${counter} | buf ${r.length ? r.start(0).toFixed(1)+"–"+r.end(0).toFixed(1)+" s" : "—"} | queue ${queue.length}`;
+        }
+    } catch(e) {
+        log("log-err", `appendBuffer error: ${e.message}`);
+        fatal_error = true;
+        reconnect();
+    }
+}
+
+// ── MediaSource open ──────────────────────────────────────────────────────────
+
+function opened() {
+    // SourceBuffer is created lazily in loadPacket() once format is known.
+
+    const params = new URLSearchParams(window.location.search);
+    const token  = params.get("token") || "demo";
+    const stream = params.get("stream") || "stream";
+    const wsUrl  = `ws://${window.location.host}/ws?token=${token}&stream=${stream}`;
+
+    log("log-info", `connecting: ${wsUrl}`);
+    status.textContent = `connecting to ${wsUrl}`;
+
+    ws = new WebSocket(wsUrl);
+    ws.binaryType = "arraybuffer";
+    ws.onopen  = () => { log("log-ok",  "WebSocket open"); status.textContent = "connected — buffering…"; };
+    ws.onclose = () => { log("log-info","WebSocket closed"); status.textContent = "WebSocket closed"; };
+    ws.onerror = (e) => { log("log-err", `WebSocket error: ${e}`); };
+    ws.onmessage = (ev) => { pushPacket(ev.data); };
+}
+
+// ── startup ───────────────────────────────────────────────────────────────────
+
+function startup() {
+    queue = []; queue_sum = 0;
+    counter = 0; load_callback_active = false;
+    not_yet_started = true; fatal_error = false;
+    passthrough = 0; format = null;
+
+    if (ws) { try { ws.close(); } catch(_) {} ws = null; }
+
+    ms = new MediaSource();
+    ms.addEventListener("sourceopen", opened);
+    video.src = URL.createObjectURL(ms);
+    video.addEventListener("error", (e) => {
+        log("log-err", `video element error: code=${video.error ? video.error.code : "?"} msg=${video.error ? video.error.message : "?"}`);
+        if (!fatal_error) { fatal_error = true; reconnect(); }
+    });
+}
+
+window.onload = startup;
+</script>
+</body>
+</html>

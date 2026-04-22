@@ -418,3 +418,85 @@ flowchart TD
     class dec2tensor,t2d,split ff
     class cpublock,gpublock,encoderblock block
 ```
+
+---
+
+## ws_html_demo.py
+
+*Stream live video directly to a browser tab — no plugins, no RTSP player required*
+
+Reads from an RTSP stream, a local media file, or a USB/V4L2 camera, muxes to
+fragmented MP4, and serves it over WebSocket.  An embedded nginx process acts as
+reverse proxy and static file server: open the printed URL in any modern browser
+and the page plays the stream via the Media Source Extensions API.
+
+**Source codec requirements:**
+
+- `--file` / `--rtsp`: the source must carry an fMP4-compatible encoded stream,
+  typically H.264.  Encoded packets are forwarded directly — no re-encoding.
+- `--usb`: the camera outputs raw frames; an encoder is inserted before the muxer.
+  Use `--hw-accel` for H.264 via NVENC (GPU required, recommended).
+  Software VP8 via libvpx is planned but needs `WebMFrameFilter` first (VP8 requires
+  a WebM container for browser MSE — it cannot be carried in fMP4).
+
+```
+python3 apps/python/ws_html_demo.py --file PATH [options]
+python3 apps/python/ws_html_demo.py --rtsp URL  [options]
+python3 apps/python/ws_html_demo.py --usb  DEV  --hw-accel [options]
+```
+
+Player URL is printed at startup:
+```
+http://localhost:{HTTP_PORT}/?token={TOKEN}&stream={UUID}
+```
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--file PATH` | — | Local media file (H.264 or other fMP4-compatible codec) |
+| `--rtsp URL` | — | RTSP stream URL (same codec requirement) |
+| `--usb DEV` | — | V4L2 device, e.g. `/dev/video0` |
+| `--ws-port PORT` | 18080 | Local WebSocket port (loopback only) |
+| `--http-port PORT` | 8090 | nginx external HTTP port |
+| `--uuid UUID` | `stream` | Stream UUID embedded in the WebSocket URL |
+| `--token TOKEN` | `demo` | Access token embedded in the player URL |
+| `--fps FPS` | 25 | Playback speed (file) or capture rate (USB) |
+| `--loop` | off | Loop file source |
+| `--width W` | 640 | USB capture width |
+| `--height H` | 480 | USB capture height |
+| `--bitrate BPS` | 4 000 000 | USB encoder bitrate |
+| `--hw-accel` | off | USB: NVENC H.264 (recommended — libx264 not in this build) |
+
+### Pipeline
+
+```mermaid
+flowchart TD
+    fileTR[MediaFileTR]
+    liveTR[LiveStreamTR]
+    usbTR[USBCameraTR]
+    encff(EncFF NVENC H.264)
+    fmp4(FMP4FF)
+    wssvr[WSSrvrTR]
+
+    fileTR ---|PacketFrame H.264| fmp4
+    liveTR ---|PacketFrame H.264| fmp4
+    usbTR ---|DecodedFrame| encff
+    encff ---|PacketFrame H.264| fmp4
+    fmp4 -->|RawFrame fMP4| wssvr
+
+    classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
+    classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
+    class fileTR,liveTR,usbTR,wssvr thread
+    class encff,fmp4 ff
+```
+
+`FMP4FrameFilter` wraps audio AAC transcoding, fMP4 muxing, and box partitioning
+into a single filter.  `WebSocketServerThread` (`WSSrvrTR`) caches the `ftyp` and
+`moov` boxes per slot and replays them to each new browser client before the next
+keyframe, so late-joiners always get a clean stream start.
+
+nginx is launched as a subprocess with `daemon off;` so it can be cleanly
+terminated on Ctrl+C.  It proxies `/ws` to the loopback WebSocket port and
+serves `ws_html_demo/static/index.html` at `/`.  The browser JS reads `token` and
+`stream` from the page's own URL query string — no server-side templating needed.
