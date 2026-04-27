@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Limef WebRTC Stream</title>
+    <style>
+        body { margin: 0; background: #111; color: #eee; font-family: monospace; }
+        #wrap { display: flex; flex-direction: column; align-items: center; padding: 1em; }
+        video { max-width: 100%; background: #000; }
+        #status  { margin-top: 0.5em; font-size: 0.85em; color: #aaa; }
+        #logbox  { margin-top: 0.5em; width: 90vw; max-width: 900px; height: 180px;
+                   background: #1a1a1a; border: 1px solid #444; overflow-y: auto;
+                   font-size: 0.75em; padding: 4px; }
+        #logbox p { margin: 0; padding: 0; line-height: 1.4; }
+        .log-ok   { color: #8fc; }
+        .log-err  { color: #f55; }
+        .log-info { color: #aaa; }
+        button { margin-top: 0.7em; padding: 0.3em 1em; font-family: monospace;
+                 background: #333; color: #eee; border: 1px solid #555; cursor: pointer; }
+        button:hover { background: #444; }
+    </style>
+</head>
+<body>
+<div id="wrap">
+    <video id="livestream" height="480" controls autoplay muted playsinline></video>
+    <p id="status">[idle]</p>
+    <button id="btn" onclick="toggle()">Connect</button>
+    <div id="logbox"></div>
+</div>
+
+<script>
+"use strict";
+
+const video  = document.getElementById("livestream");
+const status = document.getElementById("status");
+const btn    = document.getElementById("btn");
+const logbox = document.getElementById("logbox");
+
+const params    = new URLSearchParams(window.location.search);
+const uuid      = "/" + (params.get("uuid") || "stream");
+const wport     = params.get("wport") || "8090";
+const sigBase   = `http://${window.location.hostname}:${wport}`;
+
+const MAX_LOG_LINES = 200;
+var log_lines = 0;
+
+function log(cls, msg) {
+    const p = document.createElement("p");
+    p.className = cls;
+    p.textContent = new Date().toISOString().slice(11, 23) + "  " + msg;
+    logbox.appendChild(p);
+    log_lines++;
+    if (log_lines > MAX_LOG_LINES) logbox.removeChild(logbox.firstChild);
+    logbox.scrollTop = logbox.scrollHeight;
+    console.log(`[${cls}] ${msg}`);
+}
+
+// ── state ─────────────────────────────────────────────────────────────────────
+
+var pc        = null;
+var connected = false;
+
+function setStatus(msg) {
+    status.textContent = msg;
+}
+
+// ── connect / disconnect toggle ───────────────────────────────────────────────
+
+function toggle() {
+    if (connected || pc) {
+        disconnect();
+    } else {
+        connect();
+    }
+}
+
+function disconnect() {
+    if (statsTicker) { clearInterval(statsTicker); statsTicker = null; }
+    if (pc) {
+        pc.close();
+        pc = null;
+    }
+    video.srcObject = null;
+    connected = false;
+    btn.textContent = "Connect";
+    setStatus("[disconnected]");
+    log("log-info", "disconnected");
+}
+
+// ── WebRTC negotiation ────────────────────────────────────────────────────────
+
+async function connect() {
+    btn.textContent = "Disconnect";
+    setStatus("fetching offer…");
+    log("log-info", `negotiating uuid=${uuid}`);
+
+    try {
+        // 1. Fetch SDP offer directly from the WebRTC signaling port
+        //    (CORS allowed — server sends Access-Control-Allow-Origin: *)
+        const offerResp = await fetch(
+            `${sigBase}/webrtc/offer?uuid=${uuid}`
+        );
+        if (!offerResp.ok) {
+            const body = await offerResp.text();
+            throw new Error(`offer HTTP ${offerResp.status}: ${body.trim()}`);
+        }
+        const peerId  = offerResp.headers.get("X-Peer-Id");
+        const offerSdp = await offerResp.text();
+        log("log-ok", `offer received  peer_id=${peerId}`);
+        // Log the fmtp line (profile-level-id) from the offer for codec verification
+        const fmtpLine = offerSdp.split("\r\n").find(l => l.startsWith("a=fmtp:"));
+        if (fmtpLine) log("log-info", `offer fmtp: ${fmtpLine}`);
+        const rtpmapLine = offerSdp.split("\r\n").find(l => l.startsWith("a=rtpmap:"));
+        if (rtpmapLine) log("log-info", `offer rtpmap: ${rtpmapLine}`);
+
+        // 2. Create peer connection and wire up track → video
+        pc = new RTCPeerConnection();
+
+        pc.ontrack = (ev) => {
+            log("log-ok", `track received: kind=${ev.track.kind}  readyState=${ev.track.readyState}  streams=${ev.streams.length}`);
+            if (ev.streams && ev.streams[0]) {
+                video.srcObject = ev.streams[0];
+            } else {
+                // Server SDP has no msid — attach track to a synthetic stream
+                if (!video.srcObject) video.srcObject = new MediaStream();
+                video.srcObject.addTrack(ev.track);
+            }
+            video.play().catch((e) => log("log-err", `video.play() failed: ${e.message}`));
+            startStatsTicker();
+        };
+
+        video.onerror = () => {
+            const e = video.error;
+            log("log-err", `video error code=${e ? e.code : "?"} msg=${e ? e.message : "?"}`);
+        };
+        video.onstalled  = () => log("log-err", "video stalled");
+        video.onwaiting  = () => log("log-info", "video waiting for data");
+        video.onplaying  = () => log("log-ok", "video playing");
+
+        pc.onconnectionstatechange = () => {
+            const s = pc.connectionState;
+            log("log-info", `connectionState → ${s}`);
+            setStatus(s);
+            if (s === "connected") {
+                connected = true;
+            } else if (s === "failed" || s === "closed") {
+                disconnect();
+            }
+        };
+
+        pc.oniceconnectionstatechange = () => {
+            log("log-info", `iceConnectionState → ${pc.iceConnectionState}`);
+        };
+
+        pc.onsignalingstatechange = () => {
+            log("log-info", `signalingState → ${pc.signalingState}`);
+        };
+
+        // 3. Apply the offer
+        await pc.setRemoteDescription({ type: "offer", sdp: offerSdp });
+        log("log-info", "setRemoteDescription done");
+
+        // 4. Create answer
+        const answer = await pc.createAnswer();
+
+        // 5. Buffer trickle candidates gathered before the answer is confirmed,
+        //    then flush them once the server has accepted the answer.
+        //    onicecandidate must be wired up before setLocalDescription starts gathering.
+        let pendingCandidates = [];
+        let answerConfirmed   = false;
+
+        async function postCandidate(cand) {
+            try {
+                const r = await fetch(`${sigBase}/webrtc/candidate?peer_id=${peerId}`, {
+                    method:  "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body:    JSON.stringify({
+                        candidate:       cand.candidate,
+                        sdpMid:          cand.sdpMid,
+                        sdpMLineIndex:   cand.sdpMLineIndex,
+                    }),
+                });
+                if (!r.ok) log("log-err", `candidate POST ${r.status}`);
+            } catch (e) {
+                log("log-err", `candidate POST failed: ${e.message}`);
+            }
+        }
+
+        pc.onicecandidate = (ev) => {
+            if (!ev.candidate) return;   // null = end-of-gathering
+            if (answerConfirmed) {
+                postCandidate(ev.candidate);
+            } else {
+                pendingCandidates.push(ev.candidate);
+            }
+        };
+
+        await pc.setLocalDescription(answer);
+        log("log-info", "setLocalDescription done — sending answer");
+        setStatus("sending answer…");
+
+        // 6. POST answer immediately.
+        //    Use answer.sdp (from createAnswer) — it has full ICE credentials.
+        //    pc.localDescription.sdp is a live trickle-ICE view and may lag.
+        const answerResp = await fetch(
+            `${sigBase}/webrtc/answer?peer_id=${peerId}`,
+            { method: "POST", body: answer.sdp }
+        );
+        if (!answerResp.ok) {
+            const body = await answerResp.text();
+            throw new Error(`answer HTTP ${answerResp.status}: ${body.trim()}`);
+        }
+        log("log-ok", "answer accepted — trickling ICE candidates");
+        setStatus("connecting (ICE + DTLS)…");
+
+        // Flush any candidates gathered while the answer POST was in flight
+        answerConfirmed = true;
+        for (const c of pendingCandidates) postCandidate(c);
+        pendingCandidates = [];
+
+    } catch (err) {
+        log("log-err", `negotiation failed: ${err.message}`);
+        setStatus(`error: ${err.message}`);
+        disconnect();
+    }
+}
+
+// ── RTP stats ticker ─────────────────────────────────────────────────────────
+
+var statsTicker = null;
+
+function startStatsTicker() {
+    if (statsTicker) return;
+    statsTicker = setInterval(async () => {
+        if (!pc) { clearInterval(statsTicker); statsTicker = null; return; }
+        try {
+            const stats = await pc.getStats();
+            stats.forEach(r => {
+                if (r.type === "inbound-rtp" && r.kind === "video") {
+                    log("log-info",
+                        `stats: pkts=${r.packetsReceived}  lost=${r.packetsLost}` +
+                        `  framesRx=${r.framesReceived}  framesDecoded=${r.framesDecoded}` +
+                        `  pli=${r.pliCount}  jitter=${r.jitter ? r.jitter.toFixed(3) : "?"}` +
+                        `  ${r.frameWidth || "?"}x${r.frameHeight || "?"}`);
+                }
+            });
+        } catch(e) {
+            log("log-err", `getStats failed: ${e.message}`);
+        }
+    }, 3000);
+}
+
+// ── startup ───────────────────────────────────────────────────────────────────
+
+window.onload = () => {
+    log("log-info", `page loaded  uuid=${uuid}  signaling=${sigBase}`);
+    setStatus("ready — click Connect to start");
+};
+</script>
+</body>
+</html>
