@@ -7,7 +7,7 @@ RTSP server with in-process Python frame processing via PythonInterface.
 Full pipeline:
   Upstream   (C++):    MediaFileThread → Decode → SwScale(BGR24) → PythonInterface
   Consumer   (Python): pull → Gaussian blur → push
-  Downstream (C++):    SwScale(YUV420P) → EncodingFrameFilter(H264) → RTPMuxerFrameFilter
+  Downstream (C++):    SwScale(YUV420P) → EncodingFrameFilter(H264) → RTSPMuxerFrameFilter
                             → RTSPServerThread
 
 Usage:
@@ -110,7 +110,7 @@ def main():
     #enc_params.max_b_frames = 0   # no B-frames for low-latency live
 
     encode    = limef.EncodingFrameFilter('encode', enc_params)
-    rtp_muxer = limef.RTPMuxerFrameFilter('rtp_muxer')
+    rtp_muxer = limef.RTSPMuxerFrameFilter('rtp_muxer')
     # stack_size=30: absorbs I-frame bursts (several RTP packets in rapid succession).
     # fifo_size=100: cap on queued RTP packets; prevents unbounded growth under slow clients.
     # leaky is always False for RTSPServerThread — RTP sequence gaps corrupt the stream.

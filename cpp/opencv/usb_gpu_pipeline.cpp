@@ -17,12 +17,12 @@
  * usb_gpu_pipeline - Full USB camera to RTSP pipeline via GPU
  *
  * Pipeline (default, no --modify):
- *   USBCameraThread → UploadGPUFrameFilter → EncodingFrameFilter(NVENC) → RTPMuxer → RTSPServer
+ *   USBCameraThread → UploadGPUFrameFilter → EncodingFrameFilter(NVENC) → RTSPMuxerFrameFilter → RTSPServer
  *
  * Pipeline (with --modify, GPU Gaussian blur via OpenCV):
  *   USBCameraThread → UploadGPUFrameFilter → DecodedToTensorFrameFilter
  *       → GPUOpenCVThread (Gaussian blur on TensorFrame)
- *       → TensorToDecodedFrameFilter → EncodingFrameFilter(NVENC) → RTPMuxer → RTSPServer
+ *       → TensorToDecodedFrameFilter → EncodingFrameFilter(NVENC) → RTSPMuxerFrameFilter → RTSPServer
  *
  * NOTE: one copy could be eliminated here:
  * DecodedToTensorFrameFilter copies DecodedFrame -> TensorFrame
@@ -74,7 +74,7 @@
 #include "limef/framefilter/decoded_to_tensor.h"
 #include "limef/framefilter/tensor_to_decoded.h"
 #include "limef/framefilter/encoding.h"
-#include "limef/framefilter/rtp.h"
+#include "limef/framefilter/rtspmuxer.h"
 #include "limef/framefilter/dump.h"
 #include "limef/rtsp/rtspserverthread.h"
 #include "limef/encode/ffmpeg_encoder.h"
@@ -198,7 +198,7 @@ int main(int argc, char** argv) {
     EncodingFrameFilter encoder("nvenc-encoder", enc_params);
 
     // --- 7. RTP Muxer ---
-    RTPMuxerFrameFilter rtp_muxer("rtp-muxer");
+    RTSPMuxerFrameFilter rtp_muxer("rtp-muxer");
 
     // --- 8. RTSP Server ---
     FrameFifoContext rtsp_ctx(false, 5, 100);

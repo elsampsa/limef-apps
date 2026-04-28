@@ -8,7 +8,7 @@ Source codec requirements
 --------------------------
 File / RTSP:
     The source must carry an encoded stream (H.264, H.265, VP8, VP9).
-    Encoded packets pass through RTPMuxerFrameFilter without re-encoding.
+    Encoded packets pass through WebRTCMuxerFrameFilter without re-encoding.
 
 USB camera:
     The camera outputs raw decoded frames, so an encoder is required.
@@ -20,20 +20,20 @@ Pipelines
 ---------
 File / RTSP:
   [LiveStreamThread | MediaFileThread]
-       → RTPMuxerFrameFilter
+       → WebRTCMuxerFrameFilter
        → WebRTCServerThread     HTTP signaling on WEBRTC_PORT
        → nginx (static HTML)    HTTP on HTTP_PORT
 
 USB + --hw-accel (H.264 NVENC):
   USBCameraThread
        → EncodingFrameFilter(NVENC H.264)
-       → RTPMuxerFrameFilter
+       → WebRTCMuxerFrameFilter
        → WebRTCServerThread  ...
 
 USB (H.264 libx264):
   USBCameraThread
        → EncodingFrameFilter(libx264 H.264)
-       → RTPMuxerFrameFilter
+       → WebRTCMuxerFrameFilter
        → WebRTCServerThread  ...
 
 Usage:
@@ -231,7 +231,7 @@ def main():
         source, encoder = _build_usb_source(args)
 
     # ── build RTP muxer + WebRTC server ───────────────────────────────────────
-    rtp    = limef.RTPMuxerFrameFilter("rtp")
+    rtp    = limef.WebRTCMuxerFrameFilter("webrtc_muxer")
     wrtc   = limef.WebRTCServerThread("webrtc", port=args.webrtc_port)
     dump   = limef.DumpFrameFilter("dump") if args.dump else None
 

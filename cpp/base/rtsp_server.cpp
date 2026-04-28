@@ -36,7 +36,7 @@
 #include <getopt.h>
 
 #include "limef/rtsp/rtspserverthread.h"
-#include "limef/framefilter/rtp.h"
+#include "limef/framefilter/rtspmuxer.h"
 #include "limef/thread/mediafile.h"
 
 // Global flag for Ctrl+C handling
@@ -134,7 +134,7 @@ int main(int argc, char** argv) {
     // Create threads and filters
     MediaFileThread mediafile("mediafile", media_ctx, buffer_ctx);
     // mediafile.setLogLevel(spdlog::level::trace);
-    RTPMuxerFrameFilter rtp_muxer("rtp_muxer");
+    RTSPMuxerFrameFilter rtp_muxer("rtp_muxer");
     Limef::rtsp::RTSPServerThread rtsp_server(
         "rtsp_server",
         FrameFifoContext(false, 5, 100),

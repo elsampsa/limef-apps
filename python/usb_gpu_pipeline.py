@@ -13,14 +13,14 @@ Pipeline (default — passthrough, no Python processing):
         → DecodedToTensorFrameFilter(RGB)
         → TensorPythonInterface  ← Python consumer (passes frame straight through)
         → TensorToDecodedFrameFilter(RGB)
-        → EncodingFrameFilter(NVENC H264) → RTPMuxerFrameFilter → RTSPServerThread
+        → EncodingFrameFilter(NVENC H264) → RTSPMuxerFrameFilter → RTSPServerThread
 
 Pipeline (--modify — Gaussian blur in Python, mirrors C++ GPUOpenCVThread):
     [C++] USBCameraThread → UploadGPUFrameFilter(CUDA)
         → DecodedToTensorFrameFilter(RGB)
         → TensorPythonInterface  ← Python: pull GPU tensor, blur on CPU, push back
         → TensorToDecodedFrameFilter(RGB)
-        → EncodingFrameFilter(NVENC H264) → RTPMuxerFrameFilter → RTSPServerThread
+        → EncodingFrameFilter(NVENC H264) → RTSPMuxerFrameFilter → RTSPServerThread
 
 Usage:
     python3 apps/python/usb_gpu_pipeline.py [options]
@@ -141,7 +141,7 @@ def main():
     enc_params.gop_size     = args.fps // 2
 
     encoder   = limef.EncodingFrameFilter('encoder', enc_params)
-    rtp_muxer = limef.RTPMuxerFrameFilter('rtp-muxer')
+    rtp_muxer = limef.RTSPMuxerFrameFilter('rtp-muxer')
     # stack_size=30: absorbs I-frame bursts (several RTP packets in rapid succession).
     # fifo_size=100: cap on queued RTP packets; prevents unbounded growth under slow clients.
     # leaky is always False for RTSPServerThread — RTP sequence gaps corrupt the stream.

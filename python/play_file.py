@@ -7,7 +7,7 @@ Media file player: reads a local file and displays it in a window.
 Pipeline:
   MediaFileThread → [dump_src] → DecodingFrameFilter → [dump_dec] → <presenter>
 
-MediaFileThread internally chains MediaFileThread1 (file reader + AAC transcode)
+MediaFileThread internally chains MediaFileThread0 (file reader, packets as-is)
 and OrderedPacketBufferThread (DTS ordering), so no separate buffer thread is
 needed here.
 
