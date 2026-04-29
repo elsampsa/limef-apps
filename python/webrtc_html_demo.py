@@ -4,25 +4,39 @@ apps/python/webrtc_html_demo.py
 
 Browser streaming demo: RTSP / file / USB camera → WebRTC → browser.
 
-Source codec requirements
---------------------------
-File / RTSP:
-    The source must carry an encoded stream (H.264, H.265, VP8, VP9).
-    Encoded packets pass through WebRTCMuxerFrameFilter without re-encoding.
+Codec validation
+----------------
+WebRTCMuxerFrameFilter contains a CodecAssertFrameFilter as its first stage.
+If the incoming stream carries an incompatible codec pair, CodecAssert prints a
+warning and inutilizes the filter chain — no crash, no silent corruption.  The
+upstream pipeline is responsible for providing the right codec; no conversion is
+performed here.
 
-USB camera:
-    The camera outputs raw decoded frames, so an encoder is required.
+WebRTC codec constraints are extremely strict (RFC 8834).  Allowed pairs:
 
-    --hw-accel  H.264 via NVENC (hardware).  Requires an NVIDIA GPU.
-    (default)   H.264 via libx264 (software).
+  Video  | Audio           | Notes
+  -------|-----------------|-----------------------------------------------
+  H264   | Opus/PCMU/PCMA  | Baseline profile recommended for Firefox
+  H264   | —               | Video-only
+  VP8    | Opus/PCMU/PCMA  | Mandatory per RFC 8834
+  VP8    | —               | Video-only
+  VP9    | Opus            | Widely supported
+  VP9    | —               | Video-only
+  AV1    | Opus            | Chrome 90+, Firefox 93+
+  AV1    | —               | Video-only
+
+Not accepted: AAC, MP3, H.265 (not in the WebRTC spec; browsers reject them).
+For file/RTSP sources the upstream stream must already use one of these codecs —
+re-encoding is not performed.  Incompatible streams trip CodecAssert and inutilize
+the chain.
 
 Pipelines
 ---------
 File / RTSP:
   [LiveStreamThread | MediaFileThread]
-       → WebRTCMuxerFrameFilter
-       → WebRTCServerThread     HTTP signaling on WEBRTC_PORT
-       → nginx (static HTML)    HTTP on HTTP_PORT
+       → WebRTCMuxerFrameFilter   (CodecAssert validates, AnnexB, RTP mux)
+       → WebRTCServerThread       HTTP signaling on WEBRTC_PORT
+       → nginx (static HTML)      HTTP on HTTP_PORT
 
 USB + --hw-accel (H.264 NVENC):
   USBCameraThread
@@ -30,17 +44,16 @@ USB + --hw-accel (H.264 NVENC):
        → WebRTCMuxerFrameFilter
        → WebRTCServerThread  ...
 
-USB (H.264 libx264):
+USB default (VP8 libvpx, software):
   USBCameraThread
-       → EncodingFrameFilter(libx264 H.264)
+       → EncodingFrameFilter(libvpx VP8)
        → WebRTCMuxerFrameFilter
        → WebRTCServerThread  ...
 
 Usage:
     python3 apps/python/webrtc_html_demo.py --file video.mp4
     python3 apps/python/webrtc_html_demo.py --rtsp rtsp://user:pass@cam/stream
-    python3 apps/python/webrtc_html_demo.py --usb /dev/video0 --hw-accel
-    python3 apps/python/webrtc_html_demo.py --usb /dev/video0
+    python3 apps/python/webrtc_html_demo.py --usb /dev/video0 [--hw-accel]
 
 Options:
     --rtsp         URL   RTSP stream URL
@@ -54,7 +67,7 @@ Options:
     --width              USB capture width (default 640)
     --height             USB capture height (default 480)
     --bitrate            USB encoder bitrate in bps (default 4_000_000)
-    --hw-accel           USB: use NVENC H.264 instead of libx264
+    --hw-accel           USB: use NVENC H.264 instead of libvpx VP8 (software)
 
 Press Ctrl+C to stop.
 """
@@ -166,18 +179,23 @@ def _build_usb_source(args):
     cam_ctx.fps           = args.fps
 
     enc_params              = limef.FFmpegEncoderParams()
-    enc_params.codec_id     = limef.AV_CODEC_ID_H264
     enc_params.bitrate      = args.bitrate
     enc_params.max_b_frames = 0
     enc_params.gop_size     = max(1, args.fps // 2)
-    enc_params.profile      = "baseline"   # Constrained Baseline — required for Firefox WebRTC
     if args.hw_accel:
+        # H.264 via NVENC — requires NVIDIA GPU.
+        # Constrained Baseline profile is required for Firefox WebRTC.
         cam_ctx.output_format = limef.AV_PIX_FMT_NV12
+        enc_params.codec_id   = limef.AV_CODEC_ID_H264
         enc_params.hw_accel   = limef.HWACCEL_CUDA
         enc_params.preset     = "p1"
         enc_params.tune       = "ull"
+        enc_params.profile    = "baseline"
     else:
+        # VP8 via libvpx — software encoding.  VP8 is mandatory per RFC 8834.
+        # YUV420P is libvpx's native format.
         cam_ctx.output_format = limef.AV_PIX_FMT_YUV420P
+        enc_params.codec_id   = limef.AV_CODEC_ID_VP8
 
     source  = limef.USBCameraThread("source", cam_ctx)
     encoder = limef.EncodingFrameFilter("encoder", enc_params)
@@ -213,7 +231,7 @@ def main():
     p.add_argument("--bitrate",     type=int, default=4_000_000,
                    help="USB encoder bitrate in bps")
     p.add_argument("--hw-accel",    action="store_true",
-                   help="USB: use NVENC H.264 instead of libx264")
+                   help="USB: use NVENC H.264 instead of libvpx VP8 (software)")
     p.add_argument("--dump",        action="store_true",
                    help="log every RTP packet leaving the muxer (debug)")
     p.add_argument("--debug",       action="store_true",
@@ -244,6 +262,24 @@ def main():
     else:
         rtp.cc(wrtc.getInput())
 
+    player_url = f"http://localhost:{args.http_port}/?uuid={args.uuid}&wport={args.webrtc_port}"
+    print("=================================")
+    print("  WebRTC HTML Demo")
+    print("=================================")
+    if args.file:
+        print(f"Source:      file  {args.file}")
+    elif args.rtsp:
+        print(f"Source:      rtsp  {args.rtsp}")
+    else:
+        codec = "H.264/NVENC" if args.hw_accel else "VP8/libvpx"
+        print(f"Source:      usb   {args.usb}  {args.width}x{args.height}@{args.fps}  [{codec}]")
+    print(f"Stream UUID: {stream_uuid}")
+    print(f"WebRTC port: {args.webrtc_port}  (loopback)")
+    print(f"HTTP port:   {args.http_port}")
+    print(f"Player:      {player_url}")
+    print("=================================")
+    print("Press Ctrl+C to stop\n")
+
     # ── start WebRTC server ────────────────────────────────────────────────────
     if args.debug:
         wrtc.setLogLevel(limef.LOG_LEVEL_DEBUG)
@@ -256,24 +292,6 @@ def main():
 
     # ── start source ───────────────────────────────────────────────────────────
     source.start()
-
-    player_url = f"http://localhost:{args.http_port}/?uuid={args.uuid}&wport={args.webrtc_port}"
-    print("=================================")
-    print("  WebRTC HTML Demo")
-    print("=================================")
-    if args.file:
-        print(f"Source:      file  {args.file}")
-    elif args.rtsp:
-        print(f"Source:      rtsp  {args.rtsp}")
-    else:
-        codec = "H.264/NVENC" if args.hw_accel else "H.264/libx264"
-        print(f"Source:      usb   {args.usb}  {args.width}x{args.height}@{args.fps}  [{codec}]")
-    print(f"Stream UUID: {stream_uuid}")
-    print(f"WebRTC port: {args.webrtc_port}  (loopback)")
-    print(f"HTTP port:   {args.http_port}")
-    print(f"Player:      {player_url}")
-    print("=================================")
-    print("Press Ctrl+C to stop\n")
 
     # ── main loop ─────────────────────────────────────────────────────────────
     try:

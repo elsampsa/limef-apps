@@ -4,27 +4,24 @@ apps/python/ws_html_demo.py
 
 Browser streaming demo: RTSP / file / USB camera → WebSocket → browser MSE.
 
-Source codec requirements
---------------------------
-File / RTSP:
-    The source must carry an fMP4-compatible encoded stream (H.264 / AVC).
-    Encoded packets pass directly into FMP4FrameFilter without re-encoding.
+Codec validation
+----------------
+FMP4FrameFilter and WebMFrameFilter each contain a CodecAssertFrameFilter as
+their first stage.  If the incoming stream carries an incompatible codec pair,
+CodecAssert prints a warning and inutilizes the filter chain — no conversion is
+performed.  The upstream pipeline is responsible for providing the right codec.
 
-USB camera:
-    The camera outputs raw decoded frames, so an encoder is required.  Two options:
+  FMP4FrameFilter accepts: H.264/AAC, H.265/AAC, AV1/Opus, AV1/AAC
+  WebMFrameFilter accepts:  VP8, VP9/Opus, VP9/Vorbis, AV1/Opus (video-only variants too)
 
-    --hw-accel  H.264 via NVENC (hardware).  Requires an NVIDIA GPU.
-                Uses FMP4FrameFilter → WebM container NOT needed.
-
-    (default)   VP8 via libvpx (software).
-                VP8 cannot be carried in fMP4 for browser MSE, so this path
-                uses WebMFrameFilter → WebM container instead.
+If you want to stream a file with a different codec, add the necessary
+re-encoding framefilters upstream of the muxer.
 
 Pipelines
 ---------
 File / RTSP (H.264 → fMP4):
   [LiveStreamThread | MediaFileThread]
-       → FMP4FrameFilter
+       → FMP4FrameFilter      (CodecAssert validates H.264/AAC)
        → WebSocketServerThread          ws://127.0.0.1:WS_PORT
        → nginx (reverse proxy + static HTML)
 
@@ -34,10 +31,10 @@ USB + --hw-accel (H.264 NVENC → fMP4):
        → FMP4FrameFilter
        → WebSocketServerThread  ...
 
-USB (VP8 software → WebM):
+USB default (VP8 libvpx → WebM):
   USBCameraThread
        → EncodingFrameFilter(libvpx VP8)
-       → WebMFrameFilter
+       → WebMFrameFilter      (CodecAssert validates VP8)
        → WebSocketServerThread  ...
 
 Usage:
@@ -59,7 +56,7 @@ Options:
     --width        USB capture width (default 640)
     --height       USB capture height (default 480)
     --bitrate      USB encoder bitrate in bps (default 4_000_000)
-    --hw-accel     USB only: use NVENC H.264 instead of libvpx VP8
+    --hw-accel     USB only: use NVENC H.264/fMP4 instead of libvpx VP8/WebM
 
 Press Ctrl+C to stop.
 """
@@ -67,7 +64,6 @@ Press Ctrl+C to stop.
 import os
 import time
 import shlex
-import signal
 import argparse
 import textwrap
 import tempfile
@@ -234,7 +230,7 @@ def main():
     p.add_argument("--bitrate",   type=int, default=4_000_000,
                    help="USB encoder bitrate in bps")
     p.add_argument("--hw-accel",  action="store_true",
-                   help="USB: use NVENC instead of libx264")
+                   help="USB: use NVENC H.264/fMP4 instead of libvpx VP8/WebM")
     args = p.parse_args()
 
     # ── build source ───────────────────────────────────────────────────────────
@@ -246,11 +242,11 @@ def main():
         source, encoder = _build_usb_source(args)
 
     # ── build muxer (fMP4 for H.264, WebM for VP8) ────────────────────────────
-    use_webm = (args.usb and not args.hw_accel) or (args.file and pathlib.Path(args.file).suffix == ".mkv")
-    # TODO: we had a really ugly crash if we read mkv file and it goes into FMP4 muxer -> FIX!
-    # ..some warning, etc. instead
-    # and now this: [webm @ 0x73680c002480] Only VP8 or VP9 or AV1 video and Vorbis or Opus audio and WebVTT subtitles are supported for WebM.
-    # TODO: WebMFrameFilter needs an internal framefilter that converts our default AAC into vorbis
+    # USB without --hw-accel encodes VP8, which cannot go into fMP4 for MSE.
+    # All other sources (file, RTSP, USB+NVENC) are assumed H.264 → fMP4.
+    # If the codec doesn't match, CodecAssertFrameFilter inside the muxer will
+    # print a warning and inutilize the chain — no crash, no silent corruption.
+    use_webm = args.usb and not args.hw_accel
     if use_webm:
         muxer = limef.WebMFrameFilter("webm")
     else:
@@ -264,20 +260,6 @@ def main():
     else:
         source.cc(muxer)
     muxer.cc(wsserver.getInput())
-
-    # ── start WebSocket server ─────────────────────────────────────────────────
-    wsserver.start()
-    wsserver.startServer(args.ws_port)
-    wsserver.setSlotUUID(SLOT, args.uuid)
-    wsserver.addStreamToken(args.token, [args.uuid])
-
-    # ── start nginx ────────────────────────────────────────────────────────────
-    tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="limef-ws-demo-"))
-    nginx_proc = _start_nginx(tmpdir, args.ws_port, args.http_port)
-
-    # ── open gate and start source ────────────────────────────────────────────
-    muxer.open()
-    source.start()
 
     player_url = (
         f"http://localhost:{args.http_port}/"
@@ -299,6 +281,20 @@ def main():
     print(f"Player:    {player_url}")
     print("=================================")
     print("Press Ctrl+C to stop\n")
+
+    # ── start WebSocket server ─────────────────────────────────────────────────
+    wsserver.start()
+    wsserver.startServer(args.ws_port)
+    wsserver.setSlotUUID(SLOT, args.uuid)
+    wsserver.addStreamToken(args.token, [args.uuid])
+
+    # ── start nginx ────────────────────────────────────────────────────────────
+    tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="limef-ws-demo-"))
+    nginx_proc = _start_nginx(tmpdir, args.ws_port, args.http_port)
+
+    # ── open gate and start source ────────────────────────────────────────────
+    muxer.open()
+    source.start()
 
     # ── main loop ─────────────────────────────────────────────────────────────
     try:

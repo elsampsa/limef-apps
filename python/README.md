@@ -293,7 +293,7 @@ stopping the pipeline — swap your CPU or GPU processing stage on the fly.
 Encoding is done on the GPU with NVENC.
 
 ```
-python3 apps/python/usb_cpu_gpu.py [/dev/videoN]
+python3 apps/python/usb_cpu_gpu.py [--device /dev/video0] [--verbose]
 ```
 
 ### CPUBlock / GPUBlock internals
@@ -363,7 +363,7 @@ window on your Linux desktop) and `EncoderBlock` for NVENC encoding and RTSP
 streaming over the network.
 
 ```
-python3 apps/python/usb_cpu_gpu2.py [/dev/videoN]
+python3 apps/python/usb_cpu_gpu2.py [--device /dev/video0] [--verbose]
 ```
 
 ### CPUBlock / GPUBlock internals (Python threads)
@@ -430,19 +430,25 @@ fragmented MP4, and serves it over WebSocket.  An embedded nginx process acts as
 reverse proxy and static file server: open the printed URL in any modern browser
 and the page plays the stream via the Media Source Extensions API.
 
-**Source codec requirements:**
+**Codec validation:**
 
-- `--file` / `--rtsp`: the source must carry an fMP4-compatible encoded stream,
-  typically H.264.  Encoded packets are forwarded directly — no re-encoding.
-- `--usb`: the camera outputs raw frames; an encoder is inserted before the muxer.
-  Use `--hw-accel` for H.264 via NVENC (GPU required, recommended).
-  Software VP8 via libvpx is planned but needs `WebMFrameFilter` first (VP8 requires
-  a WebM container for browser MSE — it cannot be carried in fMP4).
+`FMP4FrameFilter` and `WebMFrameFilter` each contain a `CodecAssertFrameFilter`
+as their first stage.  If the incoming stream carries an incompatible codec,
+`CodecAssert` prints a warning and inutilizes the filter chain — no crash, no
+silent corruption.  The upstream pipeline is responsible for providing the right
+codec; these filters do not perform any conversion.
+
+- `--file` / `--rtsp`: packets are forwarded directly into `FMP4FrameFilter`
+  (no re-encoding).  The source is expected to carry H.264 (the most common
+  case); other fMP4-compatible codecs (H.265, AV1) also work.
+- `--usb`: the camera outputs raw frames; an encoder is inserted automatically.
+  `--hw-accel` selects NVENC H.264 → `FMP4FrameFilter` (GPU required).
+  Default (no flag) selects libvpx VP8 → `WebMFrameFilter` (software, no GPU needed).
 
 ```
 python3 apps/python/ws_html_demo.py --file PATH [options]
 python3 apps/python/ws_html_demo.py --rtsp URL  [options]
-python3 apps/python/ws_html_demo.py --usb  DEV  --hw-accel [options]
+python3 apps/python/ws_html_demo.py --usb  DEV  [--hw-accel] [options]
 ```
 
 Player URL is printed at startup:
@@ -466,7 +472,7 @@ http://localhost:{HTTP_PORT}/?token={TOKEN}&stream={UUID}
 | `--width W` | 640 | USB capture width |
 | `--height H` | 480 | USB capture height |
 | `--bitrate BPS` | 4 000 000 | USB encoder bitrate |
-| `--hw-accel` | off | USB: NVENC H.264 (recommended — libx264 not in this build) |
+| `--hw-accel` | off | USB: NVENC H.264/fMP4 instead of libvpx VP8/WebM (GPU required) |
 
 ### Pipeline
 
@@ -475,28 +481,117 @@ flowchart TD
     fileTR[MediaFileTR]
     liveTR[LiveStreamTR]
     usbTR[USBCameraTR]
-    encff(EncFF NVENC H.264)
+    encH264(EncFF NVENC H.264)
+    encVP8(EncFF libvpx VP8)
     fmp4(FMP4FF)
+    webm(WebMFF)
     wssvr[WSSrvrTR]
 
     fileTR ---|PacketFrame H.264| fmp4
     liveTR ---|PacketFrame H.264| fmp4
-    usbTR ---|DecodedFrame| encff
-    encff ---|PacketFrame H.264| fmp4
+    usbTR ---|DecodedFrame| encH264
+    usbTR ---|DecodedFrame| encVP8
+    encH264 ---|PacketFrame H.264| fmp4
+    encVP8 ---|PacketFrame VP8| webm
     fmp4 -->|RawFrame fMP4| wssvr
+    webm -->|RawFrame WebM| wssvr
 
     classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
     classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
     class fileTR,liveTR,usbTR,wssvr thread
-    class encff,fmp4 ff
+    class encH264,encVP8,fmp4,webm ff
 ```
 
-`FMP4FrameFilter` wraps audio AAC transcoding, fMP4 muxing, and box partitioning
-into a single filter.  `WebSocketServerThread` (`WSSrvrTR`) caches the `ftyp` and
-`moov` boxes per slot and replays them to each new browser client before the next
-keyframe, so late-joiners always get a clean stream start.
+`FMP4FrameFilter` and `WebMFrameFilter` each validate the incoming codec pair via
+an internal `CodecAssertFrameFilter`, then handle muxing and box/cluster
+partitioning into `RawFrame`s ready for the WebSocket server.
+`WebSocketServerThread` (`WSSrvrTR`) caches the init segment per slot and replays
+it to each new browser client before the next keyframe, so late-joiners always get
+a clean stream start.
 
 nginx is launched as a subprocess with `daemon off;` so it can be cleanly
 terminated on Ctrl+C.  It proxies `/ws` to the loopback WebSocket port and
 serves `ws_html_demo/static/index.html` at `/`.  The browser JS reads `token` and
 `stream` from the page's own URL query string — no server-side templating needed.
+
+---
+
+## webrtc_html_demo.py
+
+*Stream live video directly to a browser tab via WebRTC — lowest possible latency*
+
+Reads from an RTSP stream, a local media file, or a USB/V4L2 camera, muxes to
+RTP, and delivers it via WebRTC to any modern browser.  A `WebRTCServerThread`
+handles the ICE/SDP signaling over HTTP; an embedded nginx serves the static page.
+
+**Codec validation:**
+
+`WebRTCMuxerFrameFilter` contains a `CodecAssertFrameFilter` as its first stage.
+WebRTC codec constraints are extremely strict (RFC 8834) — incompatible codecs
+trigger a warning and inutilize the filter chain.  No conversion is performed;
+the upstream pipeline must deliver the right codec.
+
+| Video | Audio | Notes |
+|-------|-------|-------|
+| H264 | Opus / PCMU / PCMA / — | Baseline profile recommended for Firefox |
+| VP8 | Opus / PCMU / PCMA / — | Mandatory per RFC 8834 |
+| VP9 | Opus / — | Widely supported |
+| AV1 | Opus / — | Chrome 90+, Firefox 93+ |
+
+**Not accepted:** AAC, MP3, H.265 — not in the WebRTC spec; browsers reject them.
+For `--file` / `--rtsp` sources the stream must already carry a compatible codec.
+`--usb` sources encode to VP8/libvpx by default (mandatory per RFC 8834, no GPU
+needed), or H.264/NVENC with `--hw-accel`.  Both pass `CodecAssert`.
+
+```
+python3 apps/python/webrtc_html_demo.py --file PATH [options]
+python3 apps/python/webrtc_html_demo.py --rtsp URL  [options]
+python3 apps/python/webrtc_html_demo.py --usb  DEV  [--hw-accel] [options]
+```
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--file PATH` | — | Local media file |
+| `--rtsp URL` | — | RTSP stream URL |
+| `--usb DEV` | — | V4L2 device, e.g. `/dev/video0` |
+| `--webrtc-port PORT` | 8090 | WebRTC signaling HTTP port (loopback only) |
+| `--http-port PORT` | 8091 | nginx static-file HTTP port |
+| `--uuid UUID` | `stream` | Stream UUID (exposed as `/<uuid>` on the signaling server) |
+| `--fps FPS` | 25 | Playback speed (file) or capture rate (USB) |
+| `--loop` | off | Loop file source |
+| `--width W` | 640 | USB capture width |
+| `--height H` | 480 | USB capture height |
+| `--bitrate BPS` | 4 000 000 | USB encoder bitrate |
+| `--hw-accel` | off | USB: NVENC H.264 instead of libvpx VP8 (software) |
+| `--dump` | off | Log every RTP packet leaving the muxer (debug) |
+| `--debug` | off | Set WebRTCServerThread log level to DEBUG (raw SDP exchange) |
+
+### Pipeline
+
+```mermaid
+flowchart TD
+    fileTR[MediaFileTR]
+    liveTR[LiveStreamTR]
+    usbTR[USBCameraTR]
+    encff(EncFF H.264)
+    webrtcmux(WebRTCMuxerFF)
+    wrtcsvr[WebRTCServerTR]
+
+    fileTR ---|PacketFrame| webrtcmux
+    liveTR ---|PacketFrame| webrtcmux
+    usbTR ---|DecodedFrame| encff
+    encff ---|PacketFrame H.264| webrtcmux
+    webrtcmux -->|SDPFrame + RTPFrames| wrtcsvr
+
+    classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
+    classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
+    class fileTR,liveTR,usbTR,wrtcsvr thread
+    class encff,webrtcmux ff
+```
+
+`WebRTCMuxerFrameFilter` chains `CodecAssertFrameFilter` → `AnnexBFrameFilter`
+(converts H.264 AVCC to Annex B byte-stream format required by RTP) →
+`RTPMuxerFrameFilter`.  `WebRTCServerThread` handles ICE/STUN negotiation and
+SDP exchange with the browser; the static page is served by nginx on a separate port.

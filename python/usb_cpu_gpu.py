@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Demo: USB camera → CPUBlock → GPUBlock → EncoderBlock → DumpFF
 
@@ -20,7 +21,7 @@ EncoderBlock:
     GPU TensorFrame → AV_PIX_FMT_CUDA (NV12) → NVENC — no SwScale needed.
 
 Usage:
-    python usb_cpu_gpu.py [/dev/videoN]
+    python usb_cpu_gpu.py [options]
 
 Runtime switching (from an interactive Python session or a second thread):
     cpu_block.switch.toggle(1)   # route through cpu p1
@@ -30,12 +31,12 @@ Runtime switching (from an interactive Python session or a second thread):
 
 import time
 import sys
+import argparse
 import limef
 
-DEVICE           = sys.argv[1] if len(sys.argv) > 1 else "/dev/video0"
 VERBOSE_INTERVAL = 20   # TensorThreads log frame count every N frames
 
-sys.stdout.reconfigure(line_buffering=True) # necessary if we want to interleave cpp and python printouts
+sys.stdout.reconfigure(line_buffering=True)  # interleave C++ and Python printouts
 
 # ── Block definitions ─────────────────────────────────────────────────────────
 
@@ -189,94 +190,102 @@ class EncoderBlock:
         pass
 
 
-# ── Instantiate blocks ────────────────────────────────────────────────────────
-# Set verbose=True on a block to see every frame leaving that block.
+def main():
+    p = argparse.ArgumentParser(
+        description='Limef USB camera → CPU/GPU block switching demo',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument('--device', default='/dev/video0', metavar='DEV',
+                   help='V4L2 camera device')
+    p.add_argument('--verbose', action='store_true', default=False,
+                   help='print one line per frame at each block output (DumpFrameFilter)')
+    args = p.parse_args()
 
-cpu_block = CPUBlock("cpu", verbose=False)
-gpu_block = GPUBlock("gpu", verbose=False)
-enc_block = EncoderBlock("enc", verbose=True)   # show encoded output
+    # ── Instantiate blocks ────────────────────────────────────────────────────
+    cpu_block = CPUBlock("cpu", verbose=args.verbose)
+    gpu_block = GPUBlock("gpu", verbose=args.verbose)
+    enc_block = EncoderBlock("enc", verbose=args.verbose)
 
-# ── Tensor → Decoded conversion stage ─────────────────────────────────────────
-# Standalone, outside EncoderBlock, so the boundary is explicit in the wiring.
+    # ── Tensor → Decoded conversion stage ────────────────────────────────────
+    # Standalone, outside EncoderBlock, so the boundary is explicit in the wiring.
+    input_tr = limef.TensorThread("enc_input",
+                                   hw_accel=limef.HWACCEL_CUDA,
+                                   verbose_interval=VERBOSE_INTERVAL)
+    t2d = limef.TensorToDecodedFrameFilter("t2d")
 
-input_tr = limef.TensorThread("enc_input",
-                               hw_accel=limef.HWACCEL_CUDA,
-                               verbose_interval=VERBOSE_INTERVAL)
-t2d = limef.TensorToDecodedFrameFilter("t2d")
+    # ── Camera source ─────────────────────────────────────────────────────────
+    # USBCamera outputs GBRP — required by DecodedToTensorFrameFilter (CPU path).
+    # GPUBlock TensorThreads upload CPU→CUDA at the thread boundary, so the same
+    # GBRP TensorFrames flow into the GPU block without a separate UploadGPU filter.
+    ctx               = limef.USBCameraContext(args.device, slot=1)
+    ctx.width         = 640
+    ctx.height        = 480
+    ctx.fps           = 30
+    ctx.output_format = limef.AV_PIX_FMT_GBRP
 
-# ── Camera source ─────────────────────────────────────────────────────────────
-# USBCamera outputs GBRP — required by DecodedToTensorFrameFilter (CPU path).
-# GPUBlock TensorThreads upload CPU→CUDA at the thread boundary, so the same
-# GBRP TensorFrames flow into the GPU block without a separate UploadGPU filter.
+    d2t = limef.DecodedToTensorFrameFilter("d2t")
+    cam = limef.USBCameraThread("usb-cam", ctx)
 
-ctx               = limef.USBCameraContext(DEVICE, slot=1)
-ctx.width         = 640
-ctx.height        = 480
-ctx.fps           = 30
-ctx.output_format = limef.AV_PIX_FMT_GBRP
+    # ── Wire the pipeline ─────────────────────────────────────────────────────
+    #
+    #   cam --- d2t --> cpu_block --> gpu_block --> input_tr --- t2d --> enc_block
+    cam.cc(d2t)
+    d2t.cc(cpu_block.getInput())
+    cpu_block.cc(gpu_block.getInput())
+    gpu_block.cc(input_tr.getInput())
+    input_tr.cc(t2d)
+    t2d.cc(enc_block.getInput())
 
-d2t = limef.DecodedToTensorFrameFilter("d2t")
-cam = limef.USBCameraThread("usb-cam", ctx)
+    # ── Start threads (consumers before producers) ────────────────────────────
+    enc_block.start()
+    input_tr.start()
+    gpu_block.start()
+    cpu_block.start()
+    cam.start()
 
-# ── Wire the pipeline ─────────────────────────────────────────────────────────
-#
-#   cam --- d2t --> cpu_block --> gpu_block --> input_tr --- t2d --> enc_block
+    print("Pipeline running for 30 s.  Press Ctrl-C to stop early.")
+    print("  cpu_block.switch.toggle(1)  → route through cpu p1")
+    print("  gpu_block.switch.toggle(2)  → route through gpu p2")
+    print("  *.switch.toggle(0)          → back to skip (pass-through)")
 
-cam.cc(d2t)                          # DecodedFrame (GBRP)
-d2t.cc(cpu_block.getInput())         # TensorFrame  (CPU, RGB uint8)
-cpu_block.cc(gpu_block.getInput())   # TensorFrame  (CPU, RGB uint8)
-gpu_block.cc(input_tr.getInput())    # TensorFrame  (CPU or CUDA, RGB uint8)
-input_tr.cc(t2d)                     # TensorFrame  (CUDA, RGB uint8)  — after H2D upload
-t2d.cc(enc_block.getInput())         # DecodedFrame (AV_PIX_FMT_CUDA NV12)
+    try:
+        cpu_block.toggle(0)
+        time.sleep(5)
 
-# ── Start threads (consumers before producers) ────────────────────────────────
+        print("Switching to cpu thread 1")
+        cpu_block.toggle(1)
+        time.sleep(5)
 
-enc_block.start()
-input_tr.start()
-gpu_block.start()
-cpu_block.start()
-cam.start()
+        print("Switching to cpu thread 2")
+        cpu_block.toggle(2)
+        time.sleep(5)
 
-print("Pipeline running for 30 s.  Press Ctrl-C to stop early.")
-print("  cpu_block.switch.toggle(1)  → route through cpu p1")
-print("  gpu_block.switch.toggle(2)  → route through gpu p2")
-print("  *.switch.toggle(0)          → back to skip (pass-through)")
+        cpu_block.toggle(0)
 
-try:
-    cpu_block.toggle(0)
-    time.sleep(5)
+        print("Switching to gpu thread 1")
+        gpu_block.toggle(1)
+        time.sleep(5)
 
-    print("Switching to cpu thread 1")
-    cpu_block.toggle(1)
-    time.sleep(5)
+        print("Switching to gpu thread 2")
+        gpu_block.toggle(2)
+        time.sleep(5)
 
-    print("Switching to cpu thread 2")
-    cpu_block.toggle(2)
-    time.sleep(5)
+        gpu_block.toggle(0)
 
-    cpu_block.toggle(0)
+        time.sleep(5)
 
-    print("Switching to gpu thread 1")
-    gpu_block.toggle(1)
-    time.sleep(5)
+    except KeyboardInterrupt:
+        pass
 
-    print("Switching to gpu thread 2")
-    gpu_block.toggle(2)
-    time.sleep(5)
+    # ── Stop threads (source first, then consumers in order) ──────────────────
+    cam.stop()
+    cpu_block.stop()
+    gpu_block.stop()
+    input_tr.stop()
+    enc_block.stop()
 
-    gpu_block.toggle(0)
+    print("Done.")
 
-    time.sleep(5)
 
-except KeyboardInterrupt:
-    pass
-
-# ── Stop threads (source first, then consumers in order) ─────────────────────
-
-cam.stop()
-cpu_block.stop()
-gpu_block.stop()
-input_tr.stop()
-enc_block.stop()
-
-print("Done.")
+if __name__ == '__main__':
+    main()
