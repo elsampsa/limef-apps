@@ -185,12 +185,14 @@ def _build_usb_source(args):
     if args.hw_accel:
         # H.264 via NVENC — requires NVIDIA GPU.
         # Constrained Baseline profile is required for Firefox WebRTC.
+        # NOTE: this outputs annex b - no need to use a separate annex b framefilter
         cam_ctx.output_format = limef.AV_PIX_FMT_NV12
         enc_params.codec_id   = limef.AV_CODEC_ID_H264
         enc_params.hw_accel   = limef.HWACCEL_CUDA
         enc_params.preset     = "p1"
         enc_params.tune       = "ull"
         enc_params.profile    = "baseline"
+        enc_params.global_header = False # tell ffmpeg encoder to prepend sps+pps into every iframe
     else:
         # VP8 via libvpx — software encoding.  VP8 is mandatory per RFC 8834.
         # YUV420P is libvpx's native format.
@@ -232,6 +234,8 @@ def main():
                    help="USB encoder bitrate in bps")
     p.add_argument("--hw-accel",    action="store_true",
                    help="USB: use NVENC H.264 instead of libvpx VP8 (software)")
+    p.add_argument("--packetdump",   action="store_true",
+                   help="log every packet leaving the encoder, before the WebRTC muxer (debug)")
     p.add_argument("--dump",        action="store_true",
                    help="log every RTP packet leaving the muxer (debug)")
     p.add_argument("--debug",       action="store_true",
@@ -249,14 +253,14 @@ def main():
         source, encoder = _build_usb_source(args)
 
     # ── build RTP muxer + WebRTC server ───────────────────────────────────────
-    rtp    = limef.WebRTCMuxerFrameFilter("webrtc_muxer")
-    wrtc   = limef.WebRTCServerThread("webrtc", port=args.webrtc_port)
-    dump   = limef.DumpFrameFilter("dump") if args.dump else None
+    rtp         = limef.WebRTCMuxerFrameFilter("webrtc_muxer")
+    wrtc        = limef.WebRTCServerThread("webrtc", port=args.webrtc_port)
+    packetdump  = limef.DumpFrameFilter("packetdump") if args.packetdump else None
+    dump        = limef.DumpFrameFilter("dump") if args.dump else None
 
-    if encoder:
-        source.cc(encoder).cc(rtp)
-    else:
-        source.cc(rtp)
+    chain = source.cc(encoder) if encoder else source
+    chain = chain.cc(packetdump) if packetdump else chain
+    chain = chain.cc(rtp)
     if dump:
         rtp.cc(dump).cc(wrtc.getInput())
     else:
