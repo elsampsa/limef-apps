@@ -220,25 +220,40 @@ flowchart TD
 
 ---
 
-## usb_gpu_pipeline.py
+## usb_gpu_pipeline_cuda.py
 
-*Stream from USB camera, do GPU machine vision in Python, encode in the GPU and stream over the internet*
+*USB camera → CUDA GPU tensors → RTSP (NVENC or V4L2 M2M encoder)*
 
-A practical basis for remote surveillance or any live vision application: the
-camera feed is uploaded to the GPU immediately, your Python code receives frames
-as CUDA tensors (via `torch.from_dlpack()`), runs inference, draws bounding
-boxes, or applies any other processing entirely on the GPU, and the result is
-encoded by NVENC and served as RTSP — all without the data ever touching the CPU
-after the initial capture.  The demo shows a 15×15 Gaussian blur (`--modify`) as
-a stand-in for real machine vision work.
+The full zero-copy GPU pipeline: camera frames are uploaded to the GPU immediately,
+Python receives them as CUDA tensors via `torch.from_dlpack()`, and encoding is done
+on the GPU.  Target platform is **Jetson Orin** (V4L2 M2M encoder) or any CUDA
+desktop (NVENC).  The demo shows a 15×15 Gaussian blur (`--modify`) that stays
+entirely on the GPU.
 
 ```
-python3 apps/python/usb_gpu_pipeline.py [--modify] [--device /dev/video0]
-                                         [--width 640] [--height 480] [--fps 30]
-                                         [--port 8554] [--bitrate N]
+python3 apps/python/usb_gpu_pipeline_cuda.py [--modify]
+                                              [--device /dev/video0]
+                                              [--width 640] [--height 480] [--fps 30]
+                                              [--port 8554] [--bitrate N]
+                                              [--encoder nvenc|v4l2m2m]
+                                              [--enc-device /dev/video11]
+                                              [--enc-codec fwht|h264|h265]
 ```
 
 Connect with `ffplay rtsp://localhost:8554/live/stream`.
+
+| Encoder | Target | Notes |
+|---------|--------|-------|
+| `nvenc` (default) | Desktop CUDA GPU | HWACCEL_CUDA, H.264 NVENC |
+| `v4l2m2m` | Jetson Orin | `--enc-device /dev/video11 --enc-codec h264` |
+
+> **Note (Jetson):** zero-copy CUDA→V4L2 handoff (roadmap Step 6) is not yet
+> implemented; `--encoder v4l2m2m` will incur a GPU→CPU download at the encoder
+> boundary until Step 6 lands.
+
+> **Note (GPU):** keep frames on the GPU throughout.  If you push a CPU
+> `TensorFrame` into this pipeline, `Tensor2DecFF` outputs `GBRP` instead of CUDA
+> NV12 and the encoder receives the wrong format.
 
 ### Pipeline
 
@@ -247,9 +262,9 @@ flowchart TD
     camtr[USBCameraTR]
     uploadff(UploadGPUFF)
     d2t(Dec2TensorFF)
-    pyif[TensorPythonInterface]
+    pyif[TensorPythonInterface CUDA]
     t2d(Tensor2DecFF)
-    encff(EncFF)
+    encff(EncFF NVENC or V4L2)
     rtpmux(RTPMuxerFF)
     rtsptr[RTSPServerTR]
 
@@ -269,15 +284,75 @@ flowchart TD
     class uploadff,d2t,t2d,encff,rtpmux ff
 ```
 
-`TensorPythonInterface` acts as a thread boundary delivering CUDA `TensorFrame`s
-(shape `[C, H, W]`, `uint8`).  Access the data with `torch.from_dlpack()`, run
-your model or draw into the tensor, then push a new owned `TensorFrame` back.
-`Tensor2DecFF` converts back to `AV_PIX_FMT_CUDA` (NV12) for NVENC — the frame
-never leaves the GPU.
+---
 
-> **Note:** keep frames on the GPU throughout.  If you push a CPU `TensorFrame`
-> into this pipeline, `Tensor2DecFF` will output `GBRP` instead of CUDA NV12 and
-> NVENC will produce incorrect colours.
+## usb_pipeline.py
+
+*USB camera → CPU tensors → RTSP (NVENC or V4L2 M2M encoder)*
+
+The CPU tensorframe pipeline: tensors never go to the GPU before the encoding stage.
+`CpuSwScaleConverter` handles any CPU pixel format (NV12, YUV420P, …) directly inside
+`DecodedToTensorFrameFilter`.  Use this to:
+
+- **Test and develop** the CPU tensor path on any Linux desktop (use `--encoder nvenc`
+  for CUDA H.264 encoding)
+- **Deploy to Raspberry Pi** with hardware H.264 (`--encoder v4l2m2m --enc-codec h264`)
+- **Test V4L2 encoding on desktop** with vicodec (`--encoder v4l2m2m --enc-codec fwht`)
+
+`TensorToDecodedFrameFilter` (CPU path) outputs `GBRP`; `SwScaleFrameFilter` converts
+to `NV12` before the encoder.  For `--encoder nvenc`, `FFmpegEncoder` handles the
+CPU→GPU upload internally (`av_hwframe_transfer_data`) — no explicit `UploadGPUFF`
+is needed.  The pipeline wiring is identical for both encoder choices.
+
+Python receives CPU `TensorFrame`s — `frame.planes[0]` is a zero-copy numpy array.
+The `--modify` Gaussian blur uses `torch.from_numpy()` and stays on the CPU.
+
+```
+python3 apps/python/usb_pipeline.py [--modify]
+                                     [--device /dev/video0]
+                                     [--width 640] [--height 480] [--fps 30]
+                                     [--port 8554] [--bitrate N]
+                                     [--encoder nvenc|v4l2m2m]
+                                     [--enc-device /dev/video2]
+                                     [--enc-codec fwht|h264|h265]
+```
+
+Connect with `ffplay rtsp://localhost:8554/live/stream`.
+
+| Encoder | Target | Notes |
+|---------|--------|-------|
+| `nvenc` (default) | Desktop CUDA GPU | `UploadGPUFF` inserted before encoder |
+| `v4l2m2m` | RPi / Jetson | `--enc-device /dev/video2` for vicodec, `/dev/video11` for Jetson |
+
+### Pipeline (both encoders)
+
+```mermaid
+flowchart TD
+    camtr[USBCameraTR]
+    d2t(Dec2TensorFF CPU)
+    pyif[TensorPythonInterface CPU]
+    t2d(Tensor2DecFF)
+    swscale(SwScaleFF NV12)
+    encff(EncFF NVENC or V4L2)
+    rtpmux(RTPMuxerFF)
+    rtsptr[RTSPServerTR]
+
+    camtr --- d2t
+    d2t -->|TensorFrame CPU| pyif
+    pyif --- t2d
+    t2d --- swscale
+    swscale --- encff
+    encff --- rtpmux
+    rtpmux --> rtsptr
+
+    classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
+    classDef pytr   fill:#7b5ea7,stroke:#4a3570,color:#fff
+    classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
+    class camtr,rtsptr thread
+    class pyif pytr
+    class d2t,t2d,swscale,encff,rtpmux ff
+```
+
 
 ---
 
