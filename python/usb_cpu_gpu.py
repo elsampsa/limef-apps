@@ -214,14 +214,13 @@ def main():
     t2d = limef.TensorToDecodedFrameFilter("t2d")
 
     # ── Camera source ─────────────────────────────────────────────────────────
-    # USBCamera outputs GBRP — required by DecodedToTensorFrameFilter (CPU path).
-    # GPUBlock TensorThreads upload CPU→CUDA at the thread boundary, so the same
-    # GBRP TensorFrames flow into the GPU block without a separate UploadGPU filter.
-    ctx               = limef.USBCameraContext(args.device, slot=1)
-    ctx.width         = 640
-    ctx.height        = 480
-    ctx.fps           = 30
-    ctx.output_format = limef.AV_PIX_FMT_GBRP
+    # Camera emits native YUYV422; CpuSwScaleConverter in DecodedToTensorFrameFilter
+    # handles it directly. GPUBlock TensorThreads upload CPU→CUDA at the thread boundary.
+    ctx                = limef.USBCameraContext(args.device, slot=1)
+    ctx.width          = 640
+    ctx.height         = 480
+    ctx.fps            = 30
+    ctx.capture_format = limef.AV_PIX_FMT_YUYV422
 
     d2t = limef.DecodedToTensorFrameFilter("d2t")
     cam = limef.USBCameraThread("usb-cam", ctx)

@@ -143,17 +143,18 @@ def main():
     print("Press Ctrl+C to stop\n")
 
     # ── C++ camera source ──────────────────────────────────────────────────────
-    cam_ctx               = limef.USBCameraContext(args.device, SLOT)
-    cam_ctx.width         = args.width
-    cam_ctx.height        = args.height
-    cam_ctx.fps           = args.fps
-    cam_ctx.output_format = limef.AV_PIX_FMT_NV12
+    cam_ctx                = limef.USBCameraContext(args.device, SLOT)
+    cam_ctx.width          = args.width
+    cam_ctx.height         = args.height
+    cam_ctx.fps            = args.fps
+    cam_ctx.capture_format = limef.AV_PIX_FMT_YUYV422  # camera native format
 
     camera = limef.USBCameraThread('usb-camera', cam_ctx)
 
     # ── C++ upstream chain (before Python visit) ───────────────────────────────
-    upload = limef.UploadGPUFrameFilter('gpu-upload', limef.HWACCEL_CUDA)
-    d2t    = limef.DecodedToTensorFrameFilter('d2t', limef.CHANNEL_ORDER_RGB)
+    swscale = limef.SwScaleFrameFilter('swscale-nv12', limef.AV_PIX_FMT_NV12)  # explicit: YUYV→NV12
+    upload  = limef.UploadGPUFrameFilter('gpu-upload', limef.HWACCEL_CUDA)
+    d2t     = limef.DecodedToTensorFrameFilter('d2t', limef.CHANNEL_ORDER_RGB)
 
     # ── TensorPythonInterface ─────────────────────────────────────────────────
     # hw_accel=CUDA: CPU TensorFrames are uploaded at the thread boundary.
@@ -170,7 +171,7 @@ def main():
     rtsp      = limef.RTSPServerThread('rtsp-server', port=port, stack_size=30, fifo_size=100)
 
     # ── Wire the pipeline ──────────────────────────────────────────────────────
-    camera.cc(upload).cc(d2t).cc(pyf.getInput())
+    camera.cc(swscale).cc(upload).cc(d2t).cc(pyf.getInput())
     pyf.getOutput().cc(t2d).cc(encoder).cc(rtp_muxer).cc(rtsp.getInput())
 
     # ── Python consumer thread ─────────────────────────────────────────────────

@@ -171,32 +171,53 @@ def _build_rtsp_source(args):
     return source, None
 
 
-def _build_usb_source(args):
-    cam_ctx               = limef.USBCameraContext(args.usb, SLOT)
-    cam_ctx.width         = args.width
-    cam_ctx.height        = args.height
-    cam_ctx.fps           = args.fps
+class USBSource:
+    """USB camera pipeline unit: thread + SwScale + encoder, all owned as attributes.
 
-    enc_params              = limef.FFmpegEncoderParams()
-    enc_params.bitrate      = args.bitrate
-    enc_params.max_b_frames = 0
-    enc_params.gop_size     = max(1, args.fps // 2)
-    if args.hw_accel:
-        # H.264 via NVENC — requires NVIDIA GPU.
-        cam_ctx.output_format = limef.AV_PIX_FMT_NV12
-        enc_params.codec_id   = limef.AV_CODEC_ID_H264
-        enc_params.hw_accel   = limef.HWACCEL_CUDA
-        enc_params.preset     = "p1"
-        enc_params.tune       = "ull"
-    else:
-        # VP8 via libvpx — software encoding.  YUV420P is libvpx's native format.
-        cam_ctx.output_format = limef.AV_PIX_FMT_YUV420P
-        enc_params.codec_id   = limef.AV_CODEC_ID_VP8
+    cc() stores raw C++ pointers — Python must hold every chain object for the
+    pipeline's entire lifetime.  Owning them as instance attributes achieves this:
+    they live exactly as long as the USBSource instance does.
 
-    # USBCameraThread copies cam_ctx by value — construct AFTER output_format is set.
-    source  = limef.USBCameraThread("source", cam_ctx)
-    encoder = limef.EncodingFrameFilter("encoder", enc_params)
-    return source, encoder
+    Usage::
+
+        src = USBSource(args)          # builds and wires thread→swscale→encoder
+        src.chain.cc(muxer)            # continue the chain from the encoder tail
+        src.start()
+        ...
+        src.stop()
+    """
+
+    def __init__(self, args):
+        cam_ctx                = limef.USBCameraContext(args.usb, SLOT)
+        cam_ctx.width          = args.width
+        cam_ctx.height         = args.height
+        cam_ctx.fps            = args.fps
+        cam_ctx.capture_format = limef.AV_PIX_FMT_YUYV422  # camera native format
+
+        enc_params              = limef.FFmpegEncoderParams()
+        enc_params.bitrate      = args.bitrate
+        enc_params.max_b_frames = 0
+        enc_params.gop_size     = max(1, args.fps // 2)
+        if args.hw_accel:
+            # H.264 via NVENC — requires NVIDIA GPU.
+            swscale_fmt         = limef.AV_PIX_FMT_NV12
+            enc_params.codec_id = limef.AV_CODEC_ID_H264
+            enc_params.hw_accel = limef.HWACCEL_CUDA
+            enc_params.preset   = "p1"
+            enc_params.tune     = "ull"
+        else:
+            # VP8 via libvpx — software encoding.  YUV420P is libvpx's native format.
+            swscale_fmt         = limef.AV_PIX_FMT_YUV420P
+            enc_params.codec_id = limef.AV_CODEC_ID_VP8
+
+        self._thread  = limef.USBCameraThread("source", cam_ctx)
+        self._swscale = limef.SwScaleFrameFilter("swscale", swscale_fmt)
+        self._encoder = limef.EncodingFrameFilter("encoder", enc_params)
+        self._thread.cc(self._swscale).cc(self._encoder)
+        self.chain = self._encoder  # tail: connect downstream filters here
+
+    def start(self): self._thread.start()
+    def stop(self):  self._thread.stop()
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -236,10 +257,13 @@ def main():
     # ── build source ───────────────────────────────────────────────────────────
     if args.file:
         source, encoder = _build_file_source(args)
+        chain = source.cc(encoder) if encoder else source
     elif args.rtsp:
         source, encoder = _build_rtsp_source(args)
+        chain = source.cc(encoder) if encoder else source
     else:
-        source, encoder = _build_usb_source(args)
+        source = USBSource(args)   # owns all chain objects as attributes
+        chain  = source.chain      # encoder tail — connect downstream from here
 
     # ── build muxer (fMP4 for H.264, WebM for VP8) ────────────────────────────
     # USB without --hw-accel encodes VP8, which cannot go into fMP4 for MSE.
@@ -255,10 +279,7 @@ def main():
     ws_ctx   = limef.FrameFifoContext(False, 32, 64)
     wsserver = limef.WebSocketServerThread("wsserver", ws_ctx)
 
-    if encoder:
-        source.cc(encoder).cc(muxer)
-    else:
-        source.cc(muxer)
+    chain.cc(muxer)
     muxer.cc(wsserver.getInput())
 
     player_url = (

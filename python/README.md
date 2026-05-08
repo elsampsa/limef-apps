@@ -260,6 +260,7 @@ Connect with `ffplay rtsp://localhost:8554/live/stream`.
 ```mermaid
 flowchart TD
     camtr[USBCameraTR]
+    swscale(SwScaleFF NV12)
     uploadff(UploadGPUFF)
     d2t(Dec2TensorFF)
     pyif[TensorPythonInterface CUDA]
@@ -268,7 +269,8 @@ flowchart TD
     rtpmux(RTPMuxerFF)
     rtsptr[RTSPServerTR]
 
-    camtr --- uploadff
+    camtr ---|DecodedFrame YUYV| swscale
+    swscale ---|DecodedFrame NV12| uploadff
     uploadff --- d2t
     d2t -->|TensorFrame CUDA| pyif
     pyif --- t2d
@@ -281,7 +283,7 @@ flowchart TD
     classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
     class camtr,rtsptr thread
     class pyif pytr
-    class uploadff,d2t,t2d,encff,rtpmux ff
+    class swscale,uploadff,d2t,t2d,encff,rtpmux ff
 ```
 
 ---
@@ -291,8 +293,8 @@ flowchart TD
 *USB camera → CPU tensors → RTSP (NVENC or V4L2 M2M encoder)*
 
 The CPU tensorframe pipeline: tensors never go to the GPU before the encoding stage.
-`CpuSwScaleConverter` handles any CPU pixel format (NV12, YUV420P, …) directly inside
-`DecodedToTensorFrameFilter`.  Use this to:
+`CpuSwScaleConverter` handles any CPU pixel format (YUYV422, NV12, YUV420P, …) directly inside
+`DecodedToTensorFrameFilter` — no explicit SwScale needed between the camera and `Dec2TensorFF`.  Use this to:
 
 - **Test and develop** the CPU tensor path on any Linux desktop (use `--encoder nvenc`
   for CUDA H.264 encoding)

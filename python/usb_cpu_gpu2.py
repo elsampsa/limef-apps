@@ -359,11 +359,12 @@ def main():
               fifo_size=40)   # evict oldest if display falls behind a burst
 
     # ── Camera source ─────────────────────────────────────────────────────────
-    ctx               = limef.USBCameraContext(args.device, slot=1)
-    ctx.width         = 640
-    ctx.height        = 480
-    ctx.fps           = 30
-    ctx.output_format = limef.AV_PIX_FMT_GBRP   # required by DecodedToTensorFrameFilter
+    # Camera emits native YUYV422; CpuSwScaleConverter in DecodedToTensorFrameFilter handles it.
+    ctx                = limef.USBCameraContext(args.device, slot=1)
+    ctx.width          = 640
+    ctx.height         = 480
+    ctx.fps            = 30
+    ctx.capture_format = limef.AV_PIX_FMT_YUYV422
 
     d2t = limef.DecodedToTensorFrameFilter("d2t")
     cam = limef.USBCameraThread("usb-cam", ctx)

@@ -25,6 +25,7 @@ Without it, frames are passed through without blurring.
 """
 
 import os
+import sys
 import time
 import argparse
 import threading

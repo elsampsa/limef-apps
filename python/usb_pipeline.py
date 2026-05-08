@@ -137,12 +137,13 @@ def main():
     print("Press Ctrl+C to stop\n")
 
     # ── C++ camera source ──────────────────────────────────────────────────────
-    # NV12 is accepted directly by CpuSwScaleConverter in DecodedToTensorFrameFilter.
-    cam_ctx               = limef.USBCameraContext(args.device, SLOT)
-    cam_ctx.width         = args.width
-    cam_ctx.height        = args.height
-    cam_ctx.fps           = args.fps
-    cam_ctx.output_format = limef.AV_PIX_FMT_NV12
+    # Camera emits native YUYV422; CpuSwScaleConverter in DecodedToTensorFrameFilter
+    # handles any CPU pixel format directly.
+    cam_ctx                = limef.USBCameraContext(args.device, SLOT)
+    cam_ctx.width          = args.width
+    cam_ctx.height         = args.height
+    cam_ctx.fps            = args.fps
+    cam_ctx.capture_format = limef.AV_PIX_FMT_YUYV422
 
     camera = limef.USBCameraThread('usb-camera', cam_ctx)
 

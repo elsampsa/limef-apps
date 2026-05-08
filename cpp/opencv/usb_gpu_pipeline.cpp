@@ -17,10 +17,10 @@
  * usb_gpu_pipeline - Full USB camera to RTSP pipeline via GPU
  *
  * Pipeline (default, no --modify):
- *   USBCameraThread → UploadGPUFrameFilter → EncodingFrameFilter(NVENC) → RTSPMuxerFrameFilter → RTSPServer
+ *   USBCameraThread → SwScaleFrameFilter(NV12) → UploadGPUFrameFilter → EncodingFrameFilter(NVENC) → RTSPMuxerFrameFilter → RTSPServer
  *
  * Pipeline (with --modify, GPU Gaussian blur via OpenCV):
- *   USBCameraThread → UploadGPUFrameFilter → DecodedToTensorFrameFilter
+ *   USBCameraThread → SwScaleFrameFilter(NV12) → UploadGPUFrameFilter → DecodedToTensorFrameFilter
  *       → GPUOpenCVThread (Gaussian blur on TensorFrame)
  *       → TensorToDecodedFrameFilter → EncodingFrameFilter(NVENC) → RTSPMuxerFrameFilter → RTSPServer
  *
@@ -46,7 +46,7 @@
  * ─────────────────────────────────────────────────────────────────────
  * USB camera sensor              33–100 ms  Hardware, unavoidable at 30 fps
  * V4L2 capture (1 buffer)           ~0 ms  Single buffer is correct for low latency
- * SwScale YUYV→NV12                 ~1 ms  Synchronous in camera thread
+ * SwScaleFrameFilter YUYV→NV12        ~1 ms  Explicit filter after camera
  * GPU upload + NVENC encode        5–15 ms  Fast with preset=p1, tune=ull
  * GOP wait (gop_size=5 @ 30fps)   0–166 ms  IDR interval; larger → more client wait on connect
  * RTSP + network (localhost)         ~5 ms
@@ -70,6 +70,7 @@
 
 #include "gpu_opencv_thread.h"
 #include "limef/thread/usbcamera.h"
+#include "limef/framefilter/swscale.h"
 #include "limef/framefilter/uploadgpu.h"
 #include "limef/framefilter/decoded_to_tensor.h"
 #include "limef/framefilter/tensor_to_decoded.h"
@@ -165,28 +166,31 @@ int main(int argc, char** argv) {
 
     // --- 1. USB Camera (producer) ---
     USBCameraContext cam_ctx(device, SLOT);
-    cam_ctx.width = width;
-    cam_ctx.height = height;
-    cam_ctx.fps = fps;
-    cam_ctx.output_format = AV_PIX_FMT_NV12;
+    cam_ctx.width          = width;
+    cam_ctx.height         = height;
+    cam_ctx.fps            = fps;
+    cam_ctx.capture_format = AV_PIX_FMT_YUYV422;  // camera native format
 
     USBCameraThread camera("usb-camera", cam_ctx);
 
-    // --- 2. GPU Upload ---
+    // --- 2. SwScale YUYV→NV12 (explicit, required before GPU upload) ---
+    SwScaleFrameFilter swscale("swscale", AV_PIX_FMT_NV12);
+
+    // --- 3. GPU Upload ---
     UploadGPUParams upload_params(HWAccel::CUDA);
     UploadGPUFrameFilter upload("gpu-upload", upload_params);
 
-    // --- 3. DecodedFrame → TensorFrame (GPU, NV12 → CHW RGB) ---
+    // --- 4. DecodedFrame → TensorFrame (GPU, NV12 → CHW RGB) ---
     DecodedToTensorFrameFilter d2t("d2t", ChannelOrder::RGB);
 
-    // --- 4. GPU OpenCV Processing (TensorFrame in, TensorFrame out) ---
+    // --- 5. GPU OpenCV Processing (TensorFrame in, TensorFrame out) ---
     FrameFifoContext opencv_ctx(false, 5, 0, HWAccel::CUDA, "");
     LimefApp::GPUOpenCVThread opencv("gpu-opencv", opencv_ctx);
 
-    // --- 5. TensorFrame → DecodedFrame (GPU, CHW RGB → NV12 CUDA) ---
+    // --- 6. TensorFrame → DecodedFrame (GPU, CHW RGB → NV12 CUDA) ---
     TensorToDecodedFrameFilter t2d("t2d", ChannelOrder::RGB);
 
-    // --- 6. NVENC H.264 Encoding ---
+    // --- 7. NVENC H.264 Encoding ---
     encode::FFmpegEncoderParams enc_params;
     enc_params.codec_id = AV_CODEC_ID_H264;
     enc_params.hw_accel = HWAccel::CUDA;
@@ -197,10 +201,10 @@ int main(int argc, char** argv) {
     enc_params.gop_size = fps/2;
     EncodingFrameFilter encoder("nvenc-encoder", enc_params);
 
-    // --- 7. RTP Muxer ---
+    // --- 8. RTP Muxer ---
     RTSPMuxerFrameFilter rtp_muxer("rtp-muxer");
 
-    // --- 8. RTSP Server ---
+    // --- 9. RTSP Server ---
     FrameFifoContext rtsp_ctx(false, 5, 100);
     Limef::rtsp::RTSPServerThread rtsp_server("rtsp-server", rtsp_ctx, port);
 
@@ -214,17 +218,17 @@ int main(int argc, char** argv) {
     // --- Wire the pipeline ---
 
     if (modify) {
-        // USBCamera → Upload → d2t → GPUOpenCV(TensorFrame) → t2d → Encoder → RTPMuxer → RTSPServer
-        camera.getOutput().cc(upload).cc(d2t).cc(opencv.getInput());
+        // USBCamera → SwScale(NV12) → Upload → d2t → GPUOpenCV(TensorFrame) → t2d → Encoder → RTPMuxer → RTSPServer
+        camera.getOutput().cc(swscale).cc(upload).cc(d2t).cc(opencv.getInput());
         opencv.getOutput().cc(t2d).cc(encoder).cc(rtp_muxer).cc(rtsp_server.getInput());
     }
     else {
         // just encode and transmit
-        camera.getOutput().cc(upload).cc(encoder).cc(rtp_muxer).cc(rtsp_server.getInput());
+        camera.getOutput().cc(swscale).cc(upload).cc(encoder).cc(rtp_muxer).cc(rtsp_server.getInput());
     }
 
     // Debug version with dumps at each stage:
-    // camera.getOutput().cc(dump_after_camera).cc(upload).cc(dump_after_upload).cc(d2t).cc(opencv.getInput());
+    // camera.getOutput().cc(dump_after_camera).cc(swscale).cc(upload).cc(dump_after_upload).cc(d2t).cc(opencv.getInput());
     // opencv.getOutput().cc(dump_after_opencv).cc(t2d).cc(encoder).cc(dump_after_encoder).cc(rtp_muxer).cc(dump_after_rtp).cc(rtsp_server.getInput());
 
     // --- Start (reverse order: downstream first) ---

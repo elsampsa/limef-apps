@@ -172,36 +172,56 @@ def _build_rtsp_source(args):
     return source, None
 
 
-def _build_usb_source(args):
-    cam_ctx               = limef.USBCameraContext(args.usb, SLOT)
-    cam_ctx.width         = args.width
-    cam_ctx.height        = args.height
-    cam_ctx.fps           = args.fps
+class USBSource:
+    """USB camera pipeline unit: thread + SwScale + encoder, all owned as attributes.
 
-    enc_params              = limef.FFmpegEncoderParams()
-    enc_params.bitrate      = args.bitrate
-    enc_params.max_b_frames = 0
-    enc_params.gop_size     = max(1, args.fps // 2)
-    if args.hw_accel:
-        # H.264 via NVENC — requires NVIDIA GPU.
-        # Constrained Baseline profile is required for Firefox WebRTC.
-        # NOTE: this outputs annex b - no need to use a separate annex b framefilter
-        cam_ctx.output_format = limef.AV_PIX_FMT_NV12
-        enc_params.codec_id   = limef.AV_CODEC_ID_H264
-        enc_params.hw_accel   = limef.HWACCEL_CUDA
-        enc_params.preset     = "p1"
-        enc_params.tune       = "ull"
-        enc_params.profile    = "baseline"
-        enc_params.global_header = False # tell ffmpeg encoder to prepend sps+pps into every iframe
-    else:
-        # VP8 via libvpx — software encoding.  VP8 is mandatory per RFC 8834.
-        # YUV420P is libvpx's native format.
-        cam_ctx.output_format = limef.AV_PIX_FMT_YUV420P
-        enc_params.codec_id   = limef.AV_CODEC_ID_VP8
+    cc() stores raw C++ pointers — Python must hold every chain object for the
+    pipeline's entire lifetime.  Owning them as instance attributes achieves this:
+    they live exactly as long as the USBSource instance does.
 
-    source  = limef.USBCameraThread("source", cam_ctx)
-    encoder = limef.EncodingFrameFilter("encoder", enc_params)
-    return source, encoder
+    Usage::
+
+        src = USBSource(args)          # builds and wires thread→swscale→encoder
+        src.chain.cc(rtp_muxer)        # continue the chain from the encoder tail
+        src.start()
+        ...
+        src.stop()
+    """
+
+    def __init__(self, args):
+        cam_ctx                = limef.USBCameraContext(args.usb, SLOT)
+        cam_ctx.width          = args.width
+        cam_ctx.height         = args.height
+        cam_ctx.fps            = args.fps
+        cam_ctx.capture_format = limef.AV_PIX_FMT_YUYV422  # camera native format
+
+        enc_params              = limef.FFmpegEncoderParams()
+        enc_params.bitrate      = args.bitrate
+        enc_params.max_b_frames = 0
+        enc_params.gop_size     = max(1, args.fps // 2)
+        if args.hw_accel:
+            # H.264 via NVENC — requires NVIDIA GPU.
+            # Constrained Baseline profile is required for Firefox WebRTC.
+            swscale_fmt         = limef.AV_PIX_FMT_NV12
+            enc_params.codec_id = limef.AV_CODEC_ID_H264
+            enc_params.hw_accel = limef.HWACCEL_CUDA
+            enc_params.preset   = "p1"
+            enc_params.tune     = "ull"
+            enc_params.profile  = "baseline"
+            enc_params.global_header = False
+        else:
+            # VP8 via libvpx — software encoding.  VP8 is mandatory per RFC 8834.
+            swscale_fmt         = limef.AV_PIX_FMT_YUV420P
+            enc_params.codec_id = limef.AV_CODEC_ID_VP8
+
+        self._thread  = limef.USBCameraThread("source", cam_ctx)
+        self._swscale = limef.SwScaleFrameFilter("swscale", swscale_fmt)
+        self._encoder = limef.EncodingFrameFilter("encoder", enc_params)
+        self._thread.cc(self._swscale).cc(self._encoder)
+        self.chain = self._encoder  # tail: connect downstream filters here
+
+    def start(self): self._thread.start()
+    def stop(self):  self._thread.stop()
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -247,18 +267,19 @@ def main():
     # ── build source ───────────────────────────────────────────────────────────
     if args.file:
         source, encoder = _build_file_source(args)
+        chain = source.cc(encoder) if encoder else source
     elif args.rtsp:
         source, encoder = _build_rtsp_source(args)
+        chain = source.cc(encoder) if encoder else source
     else:
-        source, encoder = _build_usb_source(args)
+        source = USBSource(args)   # owns all chain objects as attributes
+        chain  = source.chain      # encoder tail — connect downstream from here
 
     # ── build RTP muxer + WebRTC server ───────────────────────────────────────
     rtp         = limef.WebRTCMuxerFrameFilter("webrtc_muxer")
     wrtc        = limef.WebRTCServerThread("webrtc", port=args.webrtc_port)
     packetdump  = limef.DumpFrameFilter("packetdump") if args.packetdump else None
     dump        = limef.DumpFrameFilter("dump") if args.dump else None
-
-    chain = source.cc(encoder) if encoder else source
     chain = chain.cc(packetdump) if packetdump else chain
     chain = chain.cc(rtp)
     if dump:
