@@ -1,5 +1,9 @@
 # Python Example Apps
 
+> [!IMPORTANT]
+> `FrameFilter` or `Thread` objects that participate in a chain **must be
+> kept alive by a Python variable** for the entire duration of the pipeline run.
+
 Demo apps for complex live streaming pipelines in python:
 
 - Stream live from USB camera
