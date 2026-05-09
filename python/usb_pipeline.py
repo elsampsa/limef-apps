@@ -55,6 +55,24 @@ _V4L2_CODEC_FOURCCS = {
 }
 
 
+def _resolve_v4l2_encoder(args):
+    """Auto-discover V4L2 encoder device and codec, with CLI overrides.
+
+    Returns (device, fourcc, codec_name).  Exits on failure.
+    """
+    devs = limef.v4l2.scan_devices()
+    sel  = limef.v4l2.select_best_codec(devs)
+    if sel is None:
+        print("ERROR: no V4L2 encoder found.")
+        print("  On x86: sudo modprobe vicodec")
+        print("  On Jetson/RPi: check that hardware codec devices exist (/dev/video10 etc.)")
+        sys.exit(1)
+    device     = args.enc_device or sel.enc_device
+    fourcc     = _V4L2_CODEC_FOURCCS[args.enc_codec] if args.enc_codec else sel.codec_fourcc
+    codec_name = args.enc_codec or sel.codec_name
+    return device, fourcc, codec_name
+
+
 def _make_gauss_kernel(device):
     """Build a 15×15 Gaussian kernel matching OpenCV GaussianBlur(15,15,0)."""
     ksize = 15
@@ -66,7 +84,7 @@ def _make_gauss_kernel(device):
     return kernel_2d.view(1, 1, ksize, ksize)
 
 
-def _build_encoder(args):
+def _build_encoder(args, enc_device=None, enc_fourcc=None):
     """Return a configured EncodingFrameFilter based on --encoder choice.
 
     NVENC: FFmpegEncoder handles CPU→GPU upload internally (av_hwframe_transfer_data)
@@ -84,8 +102,8 @@ def _build_encoder(args):
         return limef.EncodingFrameFilter('encoder', enc_params)
     else:  # v4l2m2m
         v4l2_params              = limef.V4L2EncoderParams()
-        v4l2_params.device       = args.enc_device
-        v4l2_params.codec_fourcc = _V4L2_CODEC_FOURCCS[args.enc_codec]
+        v4l2_params.device       = enc_device
+        v4l2_params.codec_fourcc = enc_fourcc
         v4l2_params.bitrate      = args.bitrate
         v4l2_params.gop_size     = args.fps // 2
         return limef.EncodingFrameFilter('encoder', v4l2_params)
@@ -111,11 +129,16 @@ def main():
                    help='RTSP URL path component')
     p.add_argument('--encoder',          choices=['nvenc', 'v4l2m2m'], default='nvenc',
                    help='encoder backend: nvenc (desktop) or v4l2m2m (RPi / vicodec)')
-    p.add_argument('--enc-device',       default='/dev/video2', metavar='DEV',
-                   help='V4L2 encoder device (v4l2m2m only; vicodec: /dev/video2, RPi: /dev/video11)')
-    p.add_argument('--enc-codec',        choices=['fwht', 'h264', 'h265'], default='h264',
-                   help='V4L2 output codec (v4l2m2m only; fwht for vicodec laptop testing)')
+    p.add_argument('--enc-device',       default=None, metavar='DEV',
+                   help='V4L2 encoder device (v4l2m2m only; auto-discovered if not set)')
+    p.add_argument('--enc-codec',        choices=['fwht', 'h264', 'h265'], default=None,
+                   help='V4L2 output codec (v4l2m2m only; auto-discovered if not set)')
     args = p.parse_args()
+
+    # ── V4L2 encoder auto-discovery ────────────────────────────────────────────
+    enc_device = enc_fourcc = enc_codec_name = None
+    if args.encoder == 'v4l2m2m':
+        enc_device, enc_fourcc, enc_codec_name = _resolve_v4l2_encoder(args)
 
     port     = args.port
     url_tail = args.url_tail
@@ -130,7 +153,7 @@ def main():
     print(f"Port:       {port}")
     print(f"URL:        rtsp://localhost:{port}{url_tail}")
     print(f"Encoder:    {args.encoder}"
-          + (f"  device={args.enc_device}  codec={args.enc_codec}"
+          + (f"  device={enc_device}  codec={enc_codec_name}"
              if args.encoder == 'v4l2m2m' else ''))
     print(f"Modify:     {args.modify}  (CPU Gaussian blur 15×15 in Python)")
     print("==============================================")
@@ -163,7 +186,7 @@ def main():
     t2d      = limef.TensorToDecodedFrameFilter('t2d', limef.CHANNEL_ORDER_RGB)
     swscale  = limef.SwScaleFrameFilter('swscale', limef.AV_PIX_FMT_NV12)
 
-    encoder = _build_encoder(args)
+    encoder = _build_encoder(args, enc_device, enc_fourcc)
 
     rtp_muxer = limef.RTSPMuxerFrameFilter('rtp-muxer')
     rtsp      = limef.RTSPServerThread('rtsp-server', port=port, stack_size=30, fifo_size=100)
