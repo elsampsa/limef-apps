@@ -133,6 +133,10 @@ def main():
                    help='V4L2 encoder device (v4l2m2m only; auto-discovered if not set)')
     p.add_argument('--enc-codec',        choices=['fwht', 'h264', 'h265'], default=None,
                    help='V4L2 output codec (v4l2m2m only; auto-discovered if not set)')
+    p.add_argument('--packetdump',       action='store_true',
+                   help='log every packet leaving the encoder, before the RTSP muxer (debug)')
+    p.add_argument('--dump',             action='store_true',
+                   help='log every packet leaving the RTSP muxer (debug)')
     args = p.parse_args()
 
     # ── V4L2 encoder auto-discovery ────────────────────────────────────────────
@@ -188,12 +192,20 @@ def main():
 
     encoder = _build_encoder(args, enc_device, enc_fourcc)
 
-    rtp_muxer = limef.RTSPMuxerFrameFilter('rtp-muxer')
-    rtsp      = limef.RTSPServerThread('rtsp-server', port=port, stack_size=30, fifo_size=100)
+    rtp_muxer   = limef.RTSPMuxerFrameFilter('rtp-muxer')
+    rtsp        = limef.RTSPServerThread('rtsp-server', port=port, stack_size=30, fifo_size=100)
+    packetdump  = limef.DumpFrameFilter('packetdump') if args.packetdump else None
+    dump        = limef.DumpFrameFilter('dump')       if args.dump       else None
 
     # ── Wire the pipeline ──────────────────────────────────────────────────────
     camera.cc(d2t).cc(pyf.getInput())
-    pyf.getOutput().cc(t2d).cc(swscale).cc(encoder).cc(rtp_muxer).cc(rtsp.getInput())
+    chain = pyf.getOutput().cc(t2d).cc(swscale).cc(encoder)
+    chain = chain.cc(packetdump) if packetdump else chain
+    chain.cc(rtp_muxer)
+    if dump:
+        rtp_muxer.cc(dump).cc(rtsp.getInput())
+    else:
+        rtp_muxer.cc(rtsp.getInput())
 
     # ── Python consumer thread ─────────────────────────────────────────────────
     stop_event  = threading.Event()
