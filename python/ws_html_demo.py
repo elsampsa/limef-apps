@@ -48,7 +48,7 @@ Options:
     --file   PATH  local media file (H.264)
     --usb    DEV   V4L2 device (default /dev/video0)
     --ws-port      local WebSocket port (default 18080)
-    --http-port    nginx HTTP port (default 8090)
+    --http-port    nginx HTTP port (default 9090)
     --uuid         stream UUID (default 'stream')
     --token        access token (default 'demo')
     --fps          playback/capture rate for file/USB (default 25)
@@ -234,7 +234,7 @@ def main():
 
     p.add_argument("--ws-port",   type=int, default=18080, metavar="PORT",
                    help="local WebSocket port (loopback only)")
-    p.add_argument("--http-port", type=int, default=8090,  metavar="PORT",
+    p.add_argument("--http-port", type=int, default=9090,  metavar="PORT",
                    help="nginx external HTTP port")
     p.add_argument("--uuid",      default="stream", metavar="UUID",
                    help="stream UUID")

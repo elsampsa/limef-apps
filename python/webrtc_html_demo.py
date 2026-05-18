@@ -59,8 +59,8 @@ Options:
     --rtsp         URL   RTSP stream URL
     --file         PATH  local media file
     --usb          DEV   V4L2 device (default /dev/video0)
-    --webrtc-port        WebRTC signaling HTTP port (default 8090)
-    --http-port          nginx static-file HTTP port (default 8091)
+    --webrtc-port        WebRTC signaling HTTP port (default 9090)
+    --http-port          nginx static-file HTTP port (default 9091)
     --uuid               stream UUID (default 'stream', exposed as /stream)
     --fps                playback/capture rate for file/USB (default 25)
     --loop               loop file source
@@ -236,9 +236,9 @@ def main():
     src.add_argument("--file",  metavar="PATH", help="local media file")
     src.add_argument("--usb",   metavar="DEV",  help="V4L2 device, e.g. /dev/video0")
 
-    p.add_argument("--webrtc-port", type=int, default=8090, metavar="PORT",
+    p.add_argument("--webrtc-port", type=int, default=9090, metavar="PORT",
                    help="WebRTC signaling HTTP port (loopback only)")
-    p.add_argument("--http-port",   type=int, default=8091, metavar="PORT",
+    p.add_argument("--http-port",   type=int, default=9091, metavar="PORT",
                    help="nginx external HTTP port")
     p.add_argument("--uuid",        default="stream", metavar="UUID",
                    help="stream UUID (exposed as /<uuid> on the WebRTC server)")
