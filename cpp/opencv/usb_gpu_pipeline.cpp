@@ -177,14 +177,14 @@ int main(int argc, char** argv) {
     SwScaleFrameFilter swscale("swscale", AV_PIX_FMT_NV12);
 
     // --- 3. GPU Upload ---
-    UploadGPUParams upload_params(HWAccel::CUDA);
+    UploadGPUParams upload_params(frame::BufferLocation::CUDA_FFMPEG);
     UploadGPUFrameFilter upload("gpu-upload", upload_params);
 
     // --- 4. DecodedFrame → TensorFrame (GPU, NV12 → CHW RGB) ---
     DecodedToTensorFrameFilter d2t("d2t", ChannelOrder::RGB);
 
     // --- 5. GPU OpenCV Processing (TensorFrame in, TensorFrame out) ---
-    FrameFifoContext opencv_ctx(false, 5, 0, HWAccel::CUDA, "");
+    FrameFifoContext opencv_ctx(false, 5, 0, frame::BufferLocation::CUDA_FFMPEG, "");
     LimefApp::GPUOpenCVThread opencv("gpu-opencv", opencv_ctx);
 
     // --- 6. TensorFrame → DecodedFrame (GPU, CHW RGB → NV12 CUDA) ---

@@ -118,7 +118,7 @@ int test_1()
     CaptureFrameFilter capture("capture");
 
     // GPUOpenCVThread with CUDA fifo (incoming CPU frames get H2D uploaded)
-    FrameFifoContext ctx(false, 5, 0, HWAccel::CUDA, "");
+    FrameFifoContext ctx(false, 5, 0, frame::BufferLocation::CUDA_FFMPEG, "");
     LimefApp::GPUOpenCVThread thread("gpu-opencv", ctx);
     thread.shortLogFormat();
     thread.getOutput().cc(capture);
