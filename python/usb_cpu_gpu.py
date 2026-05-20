@@ -62,10 +62,10 @@ class CPUBlock:
         self.switch = limef.SwitchFrameFilter(f"{name}_sw", 3)
         self.output = limef.DumpFrameFilter(f"{name}_out", verbose=verbose)
         self.p1     = limef.TensorThread(f"{name}_p1",
-                                         hw_accel=limef.HWACCEL_SW,
+                                         hw_accel=limef.HWACCEL_NONE,
                                          verbose_interval=VERBOSE_INTERVAL)
         self.p2     = limef.TensorThread(f"{name}_p2",
-                                         hw_accel=limef.HWACCEL_SW,
+                                         hw_accel=limef.HWACCEL_NONE,
                                          verbose_interval=VERBOSE_INTERVAL)
 
         self.switch.cc(0, self.output)          # skip terminal → output directly
@@ -113,7 +113,7 @@ class GPUBlock:
     def __init__(self, name, verbose=False):
         hw = (limef.HWACCEL_CUDA
               if limef.isHWAccelAvailable(limef.HWACCEL_CUDA)
-              else limef.HWACCEL_SW)
+              else limef.HWACCEL_NONE)
 
         self.switch = limef.SwitchFrameFilter(f"{name}_sw", 3)
         self.output = limef.DumpFrameFilter(f"{name}_out", verbose=verbose)

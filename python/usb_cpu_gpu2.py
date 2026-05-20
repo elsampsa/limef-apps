@@ -74,9 +74,9 @@ class CPUBlock:
         self.output = limef.DumpFrameFilter(f"{name}_out", verbose=verbose)
 
         self.p1 = limef.TensorPythonInterface(stack_size=10, leaky=True,
-                                               hw_accel=limef.HWACCEL_SW, fifo_size=0)
+                                               hw_accel=limef.HWACCEL_NONE, fifo_size=0)
         self.p2 = limef.TensorPythonInterface(stack_size=10, leaky=True,
-                                               hw_accel=limef.HWACCEL_SW, fifo_size=0)
+                                               hw_accel=limef.HWACCEL_NONE, fifo_size=0)
         self._c1 = self.p1.client()
         self._c2 = self.p2.client()
 
@@ -175,7 +175,7 @@ class GPUBlock:
         self._stop = threading.Event()
         hw = (limef.HWACCEL_CUDA
               if limef.isHWAccelAvailable(limef.HWACCEL_CUDA)
-              else limef.HWACCEL_SW)
+              else limef.HWACCEL_NONE)
 
         self.switch = limef.SwitchFrameFilter(f"{name}_sw", 3)
         self.output = limef.DumpFrameFilter(f"{name}_out", verbose=verbose)

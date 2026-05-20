@@ -179,10 +179,10 @@ def main():
     d2t = limef.DecodedToTensorFrameFilter('d2t', limef.CHANNEL_ORDER_RGB)
 
     # ── TensorPythonInterface ─────────────────────────────────────────────────
-    # hw_accel=HWACCEL_SW: CPU TensorFrames stay on CPU at the thread boundary.
+    # hw_accel=HWACCEL_NONE: CPU TensorFrames stay on CPU at the thread boundary.
     # leaky=True: drop frames if Python loop falls behind.
     pyf    = limef.TensorPythonInterface(stack_size=10, leaky=True,
-                                         hw_accel=limef.HWACCEL_SW, fifo_size=0)
+                                         hw_accel=limef.HWACCEL_NONE, fifo_size=0)
     client = pyf.client()
 
     # ── C++ downstream chain (after Python visit) ──────────────────────────────

@@ -41,7 +41,7 @@ import limef
 
 
 _DECODE_MAP = {
-    'sw':    limef.HWACCEL_SW,
+    'sw':    limef.HWACCEL_NONE,
     'cuda':  limef.HWACCEL_CUDA,
     'vaapi': limef.HWACCEL_VAAPI,
 }
