@@ -24,7 +24,7 @@
  * Receives TensorFrames with shape (3, H, W) UInt8 on GPU, applies per-channel
  * Gaussian blur via OpenCV CUDA, and emits TensorFrames downstream.
  *
- * The thread uses TensorFrameFifo with target=CUDA_FFMPEG so that incoming CPU
+ * The thread uses TensorFrameFifo with target=CUDA so that incoming CPU
  * frames are automatically uploaded to GPU in a single H2D copy.
  *
  * Typical pipeline:

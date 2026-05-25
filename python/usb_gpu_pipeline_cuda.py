@@ -153,7 +153,7 @@ def main():
 
     # ── C++ upstream chain (before Python visit) ───────────────────────────────
     swscale = limef.SwScaleFrameFilter('swscale-nv12', limef.AV_PIX_FMT_NV12)  # explicit: YUYV→NV12
-    upload  = limef.UploadGPUFrameFilter('gpu-upload', limef.HWACCEL_CUDA)
+    upload  = limef.UploadGPUFrameFilter('gpu-upload')
     d2t     = limef.DecodedToTensorFrameFilter('d2t', limef.CHANNEL_ORDER_RGB)
 
     # ── TensorPythonInterface ─────────────────────────────────────────────────
