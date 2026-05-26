@@ -265,7 +265,7 @@ Connect with `ffplay rtsp://localhost:8554/live/stream`.
 flowchart TD
     camtr[USBCameraTR]
     swscale(SwScaleFF NV12)
-    uploadff(UploadGPUFF)
+    uploadff(DecodedUploadFF)
     d2t(Dec2TensorFF)
     pyif[TensorPythonInterface CUDA]
     t2d(Tensor2DecFF)
@@ -327,7 +327,7 @@ Connect with `ffplay rtsp://localhost:8554/live/stream`.
 
 | Encoder | Target | Notes |
 |---------|--------|-------|
-| `nvenc` (default) | Desktop CUDA GPU | `UploadGPUFF` inserted before encoder |
+| `nvenc` (default) | Desktop CUDA GPU | `DecodedUploadFF` inserted before encoder |
 | `v4l2m2m` | RPi / Jetson | `--enc-device /dev/video2` for vicodec, `/dev/video11` for Jetson |
 
 ### Pipeline (both encoders)
@@ -400,6 +400,22 @@ flowchart TD
     class input,output ff
 ```
 
+### EncoderBlock internals
+
+Receives `DecodedFrame AV_PIX_FMT_CUDA NV12` directly — the `TensorThread` and
+`Tensor2DecFF` conversion sit outside this block as standalone objects.
+
+```mermaid
+flowchart TD
+    encff(EncFF NVENC H.264)
+    dumpff(DumpFF)
+
+    encff ---|PacketFrame H.264| dumpff
+
+    classDef ff fill:#5ba85a,stroke:#3d6e3d,color:#fff
+    class encff,dumpff ff
+```
+
 ### Pipeline
 
 ```mermaid
@@ -468,6 +484,23 @@ flowchart TD
     class input,output ff
 ```
 
+### EncoderBlock internals
+
+Identical to `usb_cpu_gpu.py`: receives `DecodedFrame AV_PIX_FMT_CUDA NV12` (the
+`TensorThread` + `Tensor2DecFF` output is shared with `GLXPresenterTR` via
+`SplitFrameFilter` upstream).
+
+```mermaid
+flowchart TD
+    encff(EncFF NVENC H.264)
+    dumpff(DumpFF)
+
+    encff ---|PacketFrame H.264| dumpff
+
+    classDef ff fill:#5ba85a,stroke:#3d6e3d,color:#fff
+    class encff,dumpff ff
+```
+
 ### Pipeline
 
 ```mermaid
@@ -498,6 +531,64 @@ flowchart TD
     class camthread,input_tr,glx thread
     class dec2tensor,t2d,split ff
     class cpublock,gpublock,encoderblock block
+```
+
+---
+
+## jetson_cam.py
+
+*Jetson CSI camera → RTSP (VP8 software or V4L2 H.264)*
+
+Captures from a CSI camera (e.g. IMX219 via `ArgusCameraThread`) and serves the
+stream as RTSP.  Two encoder branches are selectable at startup:
+
+| Branch | Encoder | Notes |
+|--------|---------|-------|
+| `b` (default) | libvpx VP8 (software) | Works on any Jetson; uses `CUDAScaleFrameFilter` with `output_format=YUV420P` |
+| `a` | V4L2 H.264 (hardware) | Requires a board with working NVENC (not Orin Nano) |
+
+Branch (b) performs GPU-side NV12→YUV420P conversion inside `CUDAScaleFrameFilter`
+in a single pass — no `SwScaleFrameFilter` needed.
+
+```
+python3 apps/python/jetson_cam.py [--branch a|b]
+                                  [--camera 0] [--sensor-mode 0]
+                                  [--width 1280] [--height 720] [--fps 30]
+                                  [--bitrate N] [--port 8554]
+                                  [--enc-device DEV] [--enc-codec h264|h265]
+```
+
+The RTSP URL is printed with the board's LAN IP (not `localhost`) so you can
+connect directly from another device on the same network:
+
+```bash
+ffplay rtsp://192.168.1.42:8554/live/stream
+```
+
+Requires `nvargus-daemon` running (`systemctl start nvargus-daemon`) and an IMX219
+(or compatible) CSI camera.  Run `argus_test:2` to list available sensor modes.
+
+### Pipeline (branch b)
+
+```mermaid
+flowchart TD
+    argus[ArgusCameraTR CUDA NV12]
+    scale(CUDAScaleFF NV12→YUV420P)
+    dl(DecodedDownloadFF)
+    enc(EncFF libvpx VP8)
+    rtp(RTPMuxerFF)
+    rtsp[RTSPServerTR]
+
+    argus ---|CUDA NV12 native res| scale
+    scale ---|CUDA YUV420P scaled| dl
+    dl ---|CPU YUV420P| enc
+    enc ---|PacketFrame VP8| rtp
+    rtp --> rtsp
+
+    classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
+    classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
+    class argus,rtsp thread
+    class scale,dl,enc,rtp ff
 ```
 
 ---

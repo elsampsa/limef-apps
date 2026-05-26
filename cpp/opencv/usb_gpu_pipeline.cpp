@@ -17,10 +17,10 @@
  * usb_gpu_pipeline - Full USB camera to RTSP pipeline via GPU
  *
  * Pipeline (default, no --modify):
- *   USBCameraThread → SwScaleFrameFilter(NV12) → UploadGPUFrameFilter → EncodingFrameFilter(NVENC) → RTSPMuxerFrameFilter → RTSPServer
+ *   USBCameraThread → SwScaleFrameFilter(NV12) → DecodedUploadFrameFilter → EncodingFrameFilter(NVENC) → RTSPMuxerFrameFilter → RTSPServer
  *
  * Pipeline (with --modify, GPU Gaussian blur via OpenCV):
- *   USBCameraThread → SwScaleFrameFilter(NV12) → UploadGPUFrameFilter → DecodedToTensorFrameFilter
+ *   USBCameraThread → SwScaleFrameFilter(NV12) → DecodedUploadFrameFilter → DecodedToTensorFrameFilter
  *       → GPUOpenCVThread (Gaussian blur on TensorFrame)
  *       → TensorToDecodedFrameFilter → EncodingFrameFilter(NVENC) → RTSPMuxerFrameFilter → RTSPServer
  *
@@ -71,7 +71,7 @@
 #include "gpu_opencv_thread.h"
 #include "limef/thread/usbcamera.h"
 #include "limef/framefilter/swscale.h"
-#include "limef/framefilter/uploadgpu.h"
+#include "limef/framefilter/decoded_transfer.h"
 #include "limef/framefilter/decoded_to_tensor.h"
 #include "limef/framefilter/tensor_to_decoded.h"
 #include "limef/framefilter/encoding.h"
@@ -177,8 +177,8 @@ int main(int argc, char** argv) {
     SwScaleFrameFilter swscale("swscale", AV_PIX_FMT_NV12);
 
     // --- 3. GPU Upload ---
-    UploadGPUParams upload_params(frame::BufferLocation::CUDA);
-    UploadGPUFrameFilter upload("gpu-upload", upload_params);
+    DecodedUploadParams upload_params(frame::BufferLocation::CUDA);
+    DecodedUploadFrameFilter upload("gpu-upload", upload_params);
 
     // --- 4. DecodedFrame → TensorFrame (GPU, NV12 → CHW RGB) ---
     DecodedToTensorFrameFilter d2t("d2t", ChannelOrder::RGB);

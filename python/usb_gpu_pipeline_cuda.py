@@ -18,14 +18,14 @@ Until then, --encoder v4l2m2m on Jetson will incur a GPU→CPU download at the e
 boundary.
 
 Pipeline (--encoder nvenc, passthrough):
-    [C++] USBCameraThread → UploadGPUFrameFilter(CUDA)
+    [C++] USBCameraThread → DecodedUploadFrameFilter(CUDA)
         → DecodedToTensorFrameFilter(RGB)
         → TensorPythonInterface  ← Python (pass straight through)
         → TensorToDecodedFrameFilter(RGB)
         → EncodingFrameFilter(NVENC H264) → RTSPMuxerFrameFilter → RTSPServerThread
 
 Pipeline (--encoder v4l2m2m, passthrough):
-    [C++] USBCameraThread → UploadGPUFrameFilter(CUDA)
+    [C++] USBCameraThread → DecodedUploadFrameFilter(CUDA)
         → DecodedToTensorFrameFilter(RGB)
         → TensorPythonInterface  ← Python (pass straight through)
         → TensorToDecodedFrameFilter(RGB)
@@ -153,7 +153,7 @@ def main():
 
     # ── C++ upstream chain (before Python visit) ───────────────────────────────
     swscale = limef.SwScaleFrameFilter('swscale-nv12', limef.AV_PIX_FMT_NV12)  # explicit: YUYV→NV12
-    upload  = limef.UploadGPUFrameFilter('gpu-upload')
+    upload  = limef.DecodedUploadFrameFilter('gpu-upload')
     d2t     = limef.DecodedToTensorFrameFilter('d2t', limef.CHANNEL_ORDER_RGB)
 
     # ── TensorPythonInterface ─────────────────────────────────────────────────

@@ -11,7 +11,7 @@ tensor stage.  Use this to:
 
 For desktop testing NVENC is available as the encoder (--encoder nvenc, default).
 FFmpegEncoder handles the CPU→GPU upload internally (av_hwframe_transfer_data) so no
-explicit UploadGPUFrameFilter is needed — the pipeline is identical for both encoders.
+explicit DecodedUploadFrameFilter is needed — the pipeline is identical for both encoders.
 
 Pipeline (passthrough, both encoders):
     [C++] USBCameraThread
@@ -88,7 +88,7 @@ def _build_encoder(args, enc_device=None, enc_fourcc=None):
     """Return a configured EncodingFrameFilter based on --encoder choice.
 
     NVENC: FFmpegEncoder handles CPU→GPU upload internally (av_hwframe_transfer_data)
-    so no explicit UploadGPUFrameFilter is needed before the encoder.
+    so no explicit DecodedUploadFrameFilter is needed before the encoder.
     """
     if args.encoder == 'nvenc':
         enc_params              = limef.FFmpegEncoderParams()
