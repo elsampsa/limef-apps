@@ -137,7 +137,18 @@ def main():
                    help='(branch a) V4L2 encoder device; auto-discovered if not set')
     p.add_argument('--enc-codec',    choices=['h264', 'h265', 'fwht'], default=None,
                    help='(branch a) V4L2 output codec; auto-discovered if not set')
+    p.add_argument('--list-modes',   action='store_true',
+                   help='List available Argus cameras and sensor modes, then exit')
     args = p.parse_args()
+
+    if args.list_modes:
+        modes = limef.argus.list_sensor_modes()
+        if not modes:
+            print("No cameras found (is nvargus-daemon running?)")
+            sys.exit(1)
+        for m in modes:
+            print(f"  Camera {m.camera_idx}  Mode {m.mode_idx}: {m.width}x{m.height}")
+        sys.exit(0)
 
     lan_ip   = _lan_ip()
     port     = args.port

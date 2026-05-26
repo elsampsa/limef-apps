@@ -566,7 +566,11 @@ ffplay rtsp://192.168.1.42:8554/live/stream
 ```
 
 Requires `nvargus-daemon` running (`systemctl start nvargus-daemon`) and an IMX219
-(or compatible) CSI camera.  Run `argus_test:2` to list available sensor modes.
+(or compatible) CSI camera.  To list available cameras and sensor modes:
+
+```bash
+python3 apps/python/jetson_cam.py --list-modes
+```
 
 ### Pipeline (branch b)
 
@@ -589,6 +593,71 @@ flowchart TD
     classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
     class argus,rtsp thread
     class scale,dl,enc,rtp ff
+```
+
+---
+
+## jetson_decode.py
+
+*Jetson NVDEC file decode → CUDA scale → VP8 → RTSP*
+
+Decodes a video file using Jetson NVDEC hardware (V4L2 M2M API), scales and
+converts NV12→YUV420P on the GPU in a single pass, and re-encodes as VP8 for
+RTSP streaming.  The decoder emits CUDA frames directly (`target=HWACCEL_CUDA`),
+so no CPU round-trip occurs between decode and scale.
+
+```
+python3 apps/python/jetson_decode.py --file PATH
+                                     [--width 1280] [--height 720] [--fps 30]
+                                     [--bitrate N] [--port 8554]
+                                     [--dec-device DEV]
+```
+
+The RTSP URL is printed with the board's LAN IP so you can connect from another
+device on the same network:
+
+```bash
+ffplay rtsp://192.168.1.42:8554/live/stream
+```
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--file PATH` | (required) | Input video file (H.264 recommended for NVDEC on Orin Nano) |
+| `--width W` | 1280 | Encode width (GPU scale target) |
+| `--height H` | 720 | Encode height (GPU scale target) |
+| `--fps N` | 30 | Nominal frame rate for VP8 GOP sizing |
+| `--bitrate BPS` | 4 000 000 | VP8 encoder bitrate |
+| `--port PORT` | 8554 | RTSP server port |
+| `--dec-device DEV` | auto | V4L2 decoder device (e.g. `/dev/v4l2-nvdec`); auto-discovered if not set |
+
+Requires a V4L2 decoder (NVDEC on Orin).  Run `bash tools/v4l2/v4l2_check.bash`
+to verify the device is visible and the driver is bound before running this app.
+
+### Pipeline
+
+```mermaid
+flowchart TD
+    srctr[MediaFileTR]
+    dec(DecFF V4L2/NVDEC)
+    scale(CUDAScaleFF NV12→YUV420P)
+    dl(DecodedDownloadFF)
+    enc(EncFF libvpx VP8)
+    rtp(RTSPMuxerFF)
+    rtsp[RTSPServerTR]
+
+    srctr ---|PacketFrame H.264| dec
+    dec ---|CUDA NV12| scale
+    scale ---|CUDA YUV420P scaled| dl
+    dl ---|CPU YUV420P| enc
+    enc ---|PacketFrame VP8| rtp
+    rtp --> rtsp
+
+    classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
+    classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
+    class srctr,rtsp thread
+    class dec,scale,dl,enc,rtp ff
 ```
 
 ---
