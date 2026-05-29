@@ -110,8 +110,8 @@ def main():
     enc_params.gop_size = max(1, args.fps // 2)
 
     file_ctx      = limef.MediaFileContext(args.file, SLOT)
-    file_ctx.fps  = -1   # feed at natural playback speed
-    file_ctx.loop = -1   # play once; set to 0 for gapless looping
+    file_ctx.fps  = 1   # feed at very slow speed ftm
+    file_ctx.loop = 0    # play once; set to 0 for gapless looping
 
     src      = limef.MediaFileThread('src', file_ctx)
     dec      = limef.DecodingFrameFilter('dec', dec_params)
