@@ -70,6 +70,15 @@ def main():
                    help='RTSP URL path')
     p.add_argument('--dec-device', default=None, metavar='DEV',
                    help='V4L2 decoder device (e.g. /dev/v4l2-nvdec); auto-discovered if not set')
+    p.add_argument('--inp-dump', action="store_true",
+                   help='Dump packets going into the decoder')
+    p.add_argument('--dec-dump', action="store_true",
+                   help='Dump frames after decode')
+    p.add_argument('--dl-dump', action="store_true",
+                   help='Dump frames after download')
+    p.add_argument('--enc-dump', action="store_true",
+                   help='Dump frames after encode')
+
     args = p.parse_args()
 
     lan_ip   = _lan_ip()
@@ -110,19 +119,25 @@ def main():
     enc_params.gop_size = max(1, args.fps // 2)
 
     file_ctx      = limef.MediaFileContext(args.file, SLOT)
-    file_ctx.fps  = 1   # feed at very slow speed ftm
+    file_ctx.fps  = 15   # feed at very slow speed ftm
     file_ctx.loop = 0    # play once; set to 0 for gapless looping
 
     src      = limef.MediaFileThread('src', file_ctx)
+    inpdump  = limef.DumpFrameFilter("dump0", verbose=args.inp_dump)
     dec      = limef.DecodingFrameFilter('dec', dec_params)
+    decdump  = limef.DumpFrameFilter("dump1", verbose=args.dec_dump)
     scale    = limef.CUDAScaleFrameFilter('scale', scale_params)
     download = limef.DecodedDownloadFrameFilter('download')
+    dldump  = limef.DumpFrameFilter("dump1", verbose=args.dl_dump)
     encoder  = limef.EncodingFrameFilter('encoder', enc_params)
+    encdump  = limef.DumpFrameFilter("dump2", verbose=args.enc_dump)
     rtp      = limef.RTSPMuxerFrameFilter('rtp-muxer')
+    # ----- thread boundary -------
     rtsp     = limef.RTSPServerThread('rtsp-server', port=port,
                                       stack_size=30, fifo_size=100)
 
-    src.cc(dec).cc(scale).cc(download).cc(encoder).cc(rtp).cc(rtsp.getInput())
+    # TEST: cut the filterchain right after the decoder
+    src.cc(inpdump).cc(dec).cc(decdump) #.cc(scale).cc(download).cc(dldump).cc(encoder).cc(encdump).cc(rtp).cc(rtsp.getInput())
 
     # ── Banner ────────────────────────────────────────────────────────────────
     print("==============================================")
