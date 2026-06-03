@@ -62,7 +62,7 @@ def main():
                    help='Encode height (CUDAScaleFrameFilter target)')
     p.add_argument('--fps',        type=int, default=30,
                    help='Nominal frame rate for VP8 GOP sizing')
-    p.add_argument('--bitrate',    type=int, default=4_000_000,
+    p.add_argument('--bitrate',    type=int, default=2_000_000,
                    help='VP8 encoder bitrate in bits/sec')
     p.add_argument('--port',       type=int, default=8554,
                    help='RTSP server port')
@@ -77,7 +77,9 @@ def main():
     p.add_argument('--dl-dump', action="store_true",
                    help='Dump frames after download')
     p.add_argument('--enc-dump', action="store_true",
-                   help='Dump frames after encode')
+                   help='Dump packets after encode')
+    p.add_argument('--rtp-dump', action="store_true",
+                   help='Dump packets after rtp mux')
 
     args = p.parse_args()
 
@@ -116,14 +118,15 @@ def main():
     enc_params          = limef.FFmpegEncoderParams()
     enc_params.codec_id = limef.AV_CODEC_ID_VP8
     enc_params.bitrate  = args.bitrate
-    enc_params.gop_size = max(1, args.fps // 2)
+    # enc_params.gop_size = max(1, args.fps // 2)
 
     file_ctx      = limef.MediaFileContext(args.file, SLOT)
-    file_ctx.fps  = 15   # feed at very slow speed ftm
+    file_ctx.fps  = -1   # natural fps
     file_ctx.loop = 0    # play once; set to 0 for gapless looping
 
     src      = limef.MediaFileThread('src', file_ctx)
     inpdump  = limef.DumpFrameFilter("dump0", verbose=args.inp_dump)
+    h264strip = limef.H264StripParamSetsFrameFilter("h264strip")
     dec      = limef.DecodingFrameFilter('dec', dec_params)
     decdump  = limef.DumpFrameFilter("dump1", verbose=args.dec_dump)
     scale    = limef.CUDAScaleFrameFilter('scale', scale_params)
@@ -132,12 +135,12 @@ def main():
     encoder  = limef.EncodingFrameFilter('encoder', enc_params)
     encdump  = limef.DumpFrameFilter("dump2", verbose=args.enc_dump)
     rtp      = limef.RTSPMuxerFrameFilter('rtp-muxer')
+    rtpdump  = limef.DumpFrameFilter("dump3", verbose=args.rtp_dump)
     # ----- thread boundary -------
     rtsp     = limef.RTSPServerThread('rtsp-server', port=port,
                                       stack_size=30, fifo_size=100)
 
-    # TEST: cut the filterchain right after the decoder
-    src.cc(inpdump).cc(dec).cc(decdump) #.cc(scale).cc(download).cc(dldump).cc(encoder).cc(encdump).cc(rtp).cc(rtsp.getInput())
+    src.cc(inpdump).cc(h264strip).cc(dec).cc(decdump).cc(scale).cc(download).cc(dldump).cc(encoder).cc(encdump).cc(rtp).cc(rtpdump).cc(rtsp.getInput())
 
     # ── Banner ────────────────────────────────────────────────────────────────
     print("==============================================")

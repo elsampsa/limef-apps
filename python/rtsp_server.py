@@ -55,7 +55,7 @@ def main():
     p.add_argument('-d', '--duration', type=float, default=0.0, metavar='SECS',
                    help='stop after N seconds (0 = run until Ctrl-C)')
     p.add_argument('--bitrate',        type=int, default=2_000_000,
-                   help='H.264 target bitrate in bits/sec')
+                   help='VP8 target bitrate in bits/sec')
     args = p.parse_args()
 
     if not _CV2:
