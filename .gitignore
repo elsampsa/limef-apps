@@ -27,3 +27,4 @@ __pycache__/
 *.deb
 * dump*
 *.txt
+python/pngs/
