@@ -107,7 +107,7 @@ def main():
     # V4L2 decoder: codec identity is auto-detected from the upstream CodecFrame.
     # target=HWACCEL_CUDA tells NVDEC to emit frames directly into CUDA memory,
     # so no separate upload step is needed before CUDAScaleFrameFilter.
-    dec_params        = limef.V4L2DecoderParams()
+    dec_params        = limef.V4L2NVDecoderParams()
     dec_params.device = dec_device
     dec_params.target = limef.HWACCEL_CUDA
 

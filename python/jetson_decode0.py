@@ -81,7 +81,7 @@ def main():
     file_ctx.fps  = args.fps
     file_ctx.loop = -1   # -1 = play once, no looping
 
-    dec_params        = limef.V4L2DecoderParams()
+    dec_params        = limef.V4L2NVDecoderParams()
     dec_params.device = dec_device
     dec_params.target = limef.HWACCEL_NONE   # CPU output (Block-Linear on Jetson — expected)
 
