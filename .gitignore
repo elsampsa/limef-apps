@@ -28,3 +28,4 @@ __pycache__/
 * dump*
 *.txt
 python/pngs/
+python/cam0_frames/
