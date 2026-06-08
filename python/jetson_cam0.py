@@ -2,25 +2,18 @@
 """
 apps/python/jetson_cam0.py
 
-Diagnostic: Argus CSI camera → PNG dump
-
-Captures --duration seconds of raw frames from the CSI camera and writes
-them as PNG files to --out-dir.
-
-Argus delivers pitch-linear NV12 (NVBUF_LAYOUT_PITCH) — no BL→PL conversion
-needed, unlike NVDEC.  WritePNGFrameFilter converts NV12 → RGB24 internally.
-
-Resolution is chosen via --sensor-mode.  Run --list-modes to see available
-modes.  On the IMX219 (Raspberry Pi Camera v2), mode 2 is typically 1920×1080.
+Diagnostic: Argus CSI camera frame-rate measurement and optional PNG dump.
 
 Pipeline:
     ArgusCameraThread [CPU, NV12, pitch-linear]
-        → DumpFrameFilter  (log one line per frame)
-        → WritePNGFrameFilter
+        → DumpFrameFilter       (one log line per frame)
+        → CountDecodedFrameFilter
+        [→ WritePNGFrameFilter]  (only with --png)
 
 Usage:
     python3 apps/python/jetson_cam0.py --list-modes
-    python3 apps/python/jetson_cam0.py --sensor-mode 2 --duration 1.0
+    python3 apps/python/jetson_cam0.py --sensor-mode 4 --fps 30 --duration 10
+    python3 apps/python/jetson_cam0.py --sensor-mode 2 --png --duration 2
 """
 
 import sys
@@ -40,6 +33,10 @@ def main():
                    help='Argus camera device index')
     p.add_argument('--sensor-mode', type=int, default=0,     metavar='MODE',
                    help='Sensor mode index — determines resolution (run --list-modes)')
+    p.add_argument('--fps',         type=int, default=30,
+                   help='Capture frame rate in frames per second')
+    p.add_argument('--png',         action="store_true",
+                   help='dump png (will slow down your pipeline)')
     p.add_argument('--duration',    type=float, default=1.0,
                    help='Seconds to capture')
     p.add_argument('--out-dir',     default='cam0_frames',
@@ -55,13 +52,13 @@ def main():
             print("  sudo systemctl start nvargus-daemon")
             sys.exit(1)
         for m in modes:
-            print(f"  Camera {m.camera_idx}  Mode {m.mode_idx}: {m.width}x{m.height}")
+            print(f"  Camera {m.camera_idx}  Mode {m.mode_idx}: {m.width}x{m.height}  {m.min_fps}-{m.max_fps} fps")
         sys.exit(0)
 
     print("==============================================")
     print("  Argus CSI camera → PNG diagnostic")
     print("==============================================")
-    print(f"Camera:      index={args.camera}  sensor_mode={args.sensor_mode}")
+    print(f"Camera:      index={args.camera}  sensor_mode={args.sensor_mode}  fps={args.fps}")
     print(f"Duration:    {args.duration}s")
     print(f"Output dir:  {args.out_dir}")
     print("Note: Argus NV12 is pitch-linear — no BL→PL needed")
@@ -71,13 +68,17 @@ def main():
     ctx = limef.ArgusCameraContext()
     ctx.camera_index      = args.camera
     ctx.sensor_mode_index = args.sensor_mode
+    ctx.fps               = args.fps
     ctx.output_location   = limef.HWACCEL_NONE  # CPU, pitch-linear NV12
 
-    camera = limef.ArgusCameraThread('argus-cam', ctx)
-    dump   = limef.DumpFrameFilter('dump')
-    png    = limef.WritePNGFrameFilter('png', args.out_dir)
+    camera  = limef.ArgusCameraThread('argus-cam', ctx)
+    dump    = limef.DumpFrameFilter('dump')
+    counter = limef.CountDecodedFrameFilter('counter')
+    png     = limef.WritePNGFrameFilter('png', args.out_dir)
 
-    camera.cc(dump).cc(png)
+    tail = camera.cc(dump).cc(counter)
+    if args.png:
+        tail.cc(png)
 
     print("\nStarting camera...")
     camera.start()
@@ -89,7 +90,9 @@ def main():
     except KeyboardInterrupt:
         sys.exit(1)
 
-    print(f"Done.  PNGs written to '{args.out_dir}/'")
+    counter.report()
+    if args.png:
+        print(f"PNGs written to '{args.out_dir}/'")
 
 
 if __name__ == '__main__':
