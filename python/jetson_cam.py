@@ -72,7 +72,7 @@ def _build_vp8_encoder(bitrate, fps):
     return limef.EncodingFrameFilter('encoder', p)
 
 
-def _build_mjpeg_encoder(fps):
+def _build_mjpeg_encoder():
     """FFmpeg MJPEG software encoder (input: CPU YUV420P, quality-based).
 
     All-intra codec; faster than VP8 on ARM.  Bitrate is not used.
@@ -145,6 +145,10 @@ def main():
                    help='(v4l2) V4L2 encoder device; auto-discovered if not set')
     p.add_argument('--enc-codec',     choices=['h264', 'h265', 'fwht'], default=None,
                    help='(v4l2) V4L2 output codec; auto-discovered if not set')
+    p.add_argument('--thread',        action='store_true',
+                   help='Insert a DecodedThread boundary between download and encoder (decouples filterchains)')
+    p.add_argument('--dump',          action='store_true',
+                   help='Enable verbose logging on the cpu-decoded DumpFrameFilter')
     p.add_argument('--list-modes',    action='store_true',
                    help='List available Argus cameras and sensor modes, then exit')
     args = p.parse_args()
@@ -169,7 +173,7 @@ def main():
         encoder  = _build_vp8_encoder(args.bitrate, args.fps)
         enc_info = f'libvpx VP8 (software)  bitrate={args.bitrate // 1000} kbps'
     elif args.codec == 'mjpeg':
-        encoder  = _build_mjpeg_encoder(args.fps)
+        encoder  = _build_mjpeg_encoder()
         enc_info = 'MJPEG (software, quality-based)'
     else:
         encoder, enc_device, enc_codec_name = _build_v4l2_encoder(args)
@@ -186,6 +190,7 @@ def main():
     print(f"Camera:      index={args.camera}  sensor_mode={args.sensor_mode}")
     print(f"Encode res:  {args.width}x{args.height} @ {args.fps} fps (nominal)")
     print(f"Encoder:     {enc_info}")
+    print(f"DecodedThread: {'yes' if args.thread else 'no'}")
     print(f"RTSP port:   {port}")
     print(f"LAN IP:      {lan_ip}")
     print(f"URL:         rtsp://{lan_ip}:{port}{url_tail}")
@@ -203,15 +208,23 @@ def main():
     ctx.output_location   = limef.HWACCEL_CUDA
     ctx.fps               = args.fps
 
-    camera   = limef.ArgusCameraThread('argus-cam', ctx)
-    scale    = limef.CUDAScaleFrameFilter('scale', scale_params)
-    download = limef.DecodedDownloadFrameFilter('download')
-    dump1    = limef.DumpFrameFilter('cpu-decoded', verbose=False)
-    dump2    = limef.DumpFrameFilter('encoded',     verbose=False)
-    rtp      = limef.RTSPMuxerFrameFilter('rtp-muxer')
-    rtsp     = limef.RTSPServerThread('rtsp-server', port=port, stack_size=30, fifo_size=100)
+    camera         = limef.ArgusCameraThread('argus-cam', ctx)
+    scale          = limef.CUDAScaleFrameFilter('scale', scale_params)
+    download       = limef.DecodedDownloadFrameFilter('download')
+    decoded_thread = limef.DecodedThread('decoded-thread', leaky=True) if args.thread else None
+    dump1          = limef.DumpFrameFilter('cpu-decoded', verbose=args.dump)
+    counter        = limef.CountDecodedFrameFilter('counter')
+    dump2          = limef.DumpFrameFilter('encoded',     verbose=False)
+    rtp            = limef.RTSPMuxerFrameFilter('rtp-muxer')
+    rtsp           = limef.RTSPServerThread('rtsp-server', port=port, stack_size=30, fifo_size=100)
 
-    camera.cc(scale).cc(download).cc(dump1).cc(encoder).cc(dump2).cc(rtp).cc(rtsp.getInput())
+    camera.cc(scale).cc(download)
+    if decoded_thread:
+        download.cc(decoded_thread.getInput())
+        decoded_thread.cc(dump1)
+    else:
+        download.cc(dump1)
+    dump1.cc(counter).cc(encoder).cc(dump2).cc(rtp).cc(rtsp.getInput())
 
     # ── Start (downstream first) ───────────────────────────────────────────────
     print("Starting RTSP server ...")
@@ -219,6 +232,10 @@ def main():
     time.sleep(0.1)
     rtsp.expose(SLOT, url_tail)
     time.sleep(0.05)
+
+    if decoded_thread:
+        print("Starting DecodedThread ...")
+        decoded_thread.start()
 
     print("Starting Argus camera ...")
     camera.start()
@@ -240,6 +257,15 @@ def main():
         camera.stop()
     except KeyboardInterrupt:
         sys.exit(1)
+
+    counter.report()
+
+    if decoded_thread:
+        print("Stopping DecodedThread ...")
+        try:
+            decoded_thread.stop()
+        except KeyboardInterrupt:
+            sys.exit(1)
 
     print("Stopping RTSP server ...")
     try:
