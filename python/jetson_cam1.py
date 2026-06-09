@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-apps/python/jetson_cam0.py
+apps/python/jetson_cam1.py
 
-Diagnostic: Argus CSI camera frame-rate measurement and optional PNG dump.
+Argus CSI camera via CUDA path: capture → GPU scale → CPU download → optional PNG dump.
 
 Pipeline:
-    ArgusCameraThread [CPU, NV12, pitch-linear]
-        → DumpFrameFilter       (one log line per frame)
+    ArgusCameraThread [CUDA, NV12, EGL-mapped]
+        → CUDAScaleFrameFilter   (GPU bilinear resize; 0×0 = keep source size)
+        → DecodedDownloadFrameFilter  (CUDA NV12 → CPU NV12)
         → CountDecodedFrameFilter
         [→ WritePNGFrameFilter]  (only with --png)
 
 Usage:
-    python3 apps/python/jetson_cam0.py --list-modes
-    python3 apps/python/jetson_cam0.py --sensor-mode 4 --fps 30 --duration 10
-    python3 apps/python/jetson_cam0.py --sensor-mode 2 --png --duration 2
+    python3 apps/python/jetson_cam1.py --list-modes
+    python3 apps/python/jetson_cam1.py --sensor-mode 4 --fps 30 --duration 10
+    python3 apps/python/jetson_cam1.py --sensor-mode 4 --width 640 --height 360 --png --duration 2
 """
 
 import sys
@@ -26,7 +27,7 @@ sys.stdout.reconfigure(line_buffering=True)
 
 def main():
     p = argparse.ArgumentParser(
-        description='Argus CSI camera diagnostic: dump N seconds of PNGs',
+        description='Argus CSI camera CUDA path: capture → GPU scale → CPU download → optional PNG',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument('--camera',      type=int, default=0,     metavar='IDX',
@@ -35,11 +36,15 @@ def main():
                    help='Sensor mode index — determines resolution (run --list-modes)')
     p.add_argument('--fps',         type=int, default=30,
                    help='Capture frame rate in frames per second')
-    p.add_argument('--png',         action="store_true",
-                   help='dump png (will slow down your pipeline)')
+    p.add_argument('--width',       type=int, default=0,
+                   help='Scale output width (0 = keep sensor resolution)')
+    p.add_argument('--height',      type=int, default=0,
+                   help='Scale output height (0 = keep sensor resolution)')
+    p.add_argument('--png',         action='store_true',
+                   help='Write PNG frames (slows pipeline)')
     p.add_argument('--duration',    type=float, default=1.0,
                    help='Seconds to capture')
-    p.add_argument('--out-dir',     default='cam0_frames',
+    p.add_argument('--out-dir',     default='cam1_frames',
                    help='Directory for PNG output (created if absent)')
     p.add_argument('--list-modes',  action='store_true',
                    help='List available Argus cameras and sensor modes, then exit')
@@ -55,10 +60,12 @@ def main():
             print(f"  Camera {m.camera_idx}  Mode {m.mode_idx}: {m.width}x{m.height}  {m.min_fps}-{m.max_fps} fps")
         sys.exit(0)
 
+    scale_str = f"{args.width}x{args.height}" if (args.width or args.height) else "passthrough"
     print("==============================================")
-    print("  Argus CSI camera → PNG diagnostic")
+    print("  Argus CSI camera → CUDA scale → CPU download")
     print("==============================================")
     print(f"Camera:      index={args.camera}  sensor_mode={args.sensor_mode}  fps={args.fps}")
+    print(f"Scale:       {scale_str}")
     print(f"Duration:    {args.duration}s")
     print(f"Output dir:  {args.out_dir}")
     print("==============================================")
@@ -68,14 +75,16 @@ def main():
     ctx.camera_index      = args.camera
     ctx.sensor_mode_index = args.sensor_mode
     ctx.fps               = args.fps
-    ctx.output_location   = limef.HWACCEL_NONE  # CPU, pitch-linear NV12
+    ctx.output_location   = limef.HWACCEL_CUDA
 
-    camera  = limef.ArgusCameraThread('argus-cam', ctx)
-    dump    = limef.DumpFrameFilter('dump')
-    counter = limef.CountDecodedFrameFilter('counter')
-    png     = limef.WritePNGFrameFilter('png', args.out_dir)
+    camera   = limef.ArgusCameraThread('argus-cam', ctx)
+    dump     = limef.DumpFrameFilter('dump', verbose=False)
+    scale    = limef.CUDAScaleFrameFilter('scale', limef.CUDAScaleParams(args.width, args.height))
+    download = limef.DecodedDownloadFrameFilter('download')
+    counter  = limef.CountDecodedFrameFilter('counter')
+    png      = limef.WritePNGFrameFilter('png', args.out_dir)
 
-    tail = camera.cc(dump).cc(counter)
+    tail = camera.cc(dump).cc(scale).cc(download).cc(counter)
     if args.png:
         tail.cc(png)
 
