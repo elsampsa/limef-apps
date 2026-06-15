@@ -208,7 +208,7 @@ class USBSource:
             enc_params.preset   = "p1"
             enc_params.tune     = "ull"
             enc_params.profile  = "baseline"
-            enc_params.global_header = False
+            enc_params.global_header = False # = prepend sps & pps before every intra frame
         else:
             # VP8 via libvpx — software encoding.  VP8 is mandatory per RFC 8834.
             swscale_fmt         = limef.AV_PIX_FMT_YUV420P
