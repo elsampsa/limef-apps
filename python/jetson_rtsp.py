@@ -11,7 +11,8 @@ Pipeline:
 
     MediaFileThread           [encoded packets from file]
         → DecodingFrameFilter     (FFmpeg SW decoder, CPU YUV420P output)
-        → DecodedUploadFrameFilter (CPU YUV420P → CUDA NV12, AV_PIX_FMT_CUDA)
+        → DecodedUploadFrameFilter (CPU YUV420P → CUDA YUV420P)
+        → CUDAScaleFrameFilter     (GPU UV interleave: YUV420P → NV12)
         → DumpFrameFilter          (pre-encode, verbose with --pre-dump)
         → EncodingFrameFilter      (V4L2NVEncoder, H.264 via /dev/v4l2-nvenc)
         → DumpFrameFilter          (post-encode, verbose with --post-dump)
@@ -104,17 +105,18 @@ def main():
     file_ctx.loop = args.loop
 
     # ── Build pipeline objects ──────────────────────────────────────────────────
-    src      = limef.MediaFileThread('src', file_ctx)
-    sw_dec   = limef.DecodingFrameFilter('sw-dec')
-    upload   = limef.DecodedUploadFrameFilter('upload')
-    pre_dump = limef.DumpFrameFilter('pre-enc',  verbose=args.pre_dump)
-    encoder  = limef.EncodingFrameFilter('encoder', enc_params)
+    src       = limef.MediaFileThread('src', file_ctx)
+    sw_dec    = limef.DecodingFrameFilter('sw-dec')
+    upload    = limef.DecodedUploadFrameFilter('upload')
+    to_nv12   = limef.CUDAScaleFrameFilter('to-nv12')   # YUV420P CUDA → NV12 CUDA
+    pre_dump  = limef.DumpFrameFilter('pre-enc',  verbose=args.pre_dump)
+    encoder   = limef.EncodingFrameFilter('encoder', enc_params)
     post_dump = limef.DumpFrameFilter('post-enc', verbose=args.post_dump)
-    rtp      = limef.RTSPMuxerFrameFilter('rtp-muxer')
-    rtsp     = limef.RTSPServerThread('rtsp-server', port=port,
-                                      stack_size=30, fifo_size=100)
+    rtp       = limef.RTSPMuxerFrameFilter('rtp-muxer')
+    rtsp      = limef.RTSPServerThread('rtsp-server', port=port,
+                                       stack_size=30, fifo_size=100)
 
-    src.cc(sw_dec).cc(upload).cc(pre_dump).cc(encoder).cc(post_dump).cc(rtp).cc(rtsp.getInput())
+    src.cc(sw_dec).cc(upload).cc(to_nv12).cc(pre_dump).cc(encoder).cc(post_dump).cc(rtp).cc(rtsp.getInput())
 
     # ── Banner ──────────────────────────────────────────────────────────────────
     print("==============================================")

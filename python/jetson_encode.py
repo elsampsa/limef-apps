@@ -84,6 +84,9 @@ def main():
     sw_dec1    = limef.DecodingFrameFilter('sw-dec1')
     dump1      = limef.DumpFrameFilter('post-dec1', verbose=True)
     upload     = limef.DecodedUploadFrameFilter('upload')
+    # yuv420p→NV12 on GPU: DecodedUploadFrameFilter now preserves yuv420p layout;
+    # CUDAScaleFrameFilter interleaves U+V into NV12 for V4L2NVEncoder.
+    to_nv12    = limef.CUDAScaleFrameFilter('to-nv12')   # dst 0×0 = same size, NV12 out
     dump2      = limef.DumpFrameFilter('pre-enc',   verbose=True)
     encoder    = limef.EncodingFrameFilter('encoder', enc_params)
     dump3      = limef.DumpFrameFilter('post-enc',  verbose=True)
@@ -91,7 +94,7 @@ def main():
     dump4      = limef.DumpFrameFilter('pre-png',   verbose=True)
     png_writer = limef.WritePNGFrameFilter('png-writer', args.out_dir)
 
-    src.cc(sw_dec1).cc(dump1).cc(upload).cc(dump2).cc(encoder) \
+    src.cc(sw_dec1).cc(dump1).cc(upload).cc(to_nv12).cc(dump2).cc(encoder) \
        .cc(dump3).cc(sw_dec2).cc(dump4).cc(png_writer)
 
     # ── Banner ────────────────────────────────────────────────────────────────
