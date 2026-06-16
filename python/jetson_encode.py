@@ -89,6 +89,7 @@ def main():
     to_nv12    = limef.CUDAScaleFrameFilter('to-nv12')   # dst 0×0 = same size, NV12 out
     dump2      = limef.DumpFrameFilter('pre-enc',   verbose=True)
     encoder    = limef.EncodingFrameFilter('encoder', enc_params)
+    encoder.setLogLevel(limef.LOG_LEVEL_DEBUG)
     dump3      = limef.DumpFrameFilter('post-enc',  verbose=True)
     sw_dec2    = limef.DecodingFrameFilter('sw-dec2')
     dump4      = limef.DumpFrameFilter('pre-png',   verbose=True)
