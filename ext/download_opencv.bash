@@ -15,7 +15,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-OPENCV_VERSION="4.10.0"
+OPENCV_VERSION="4.13.0"
 INSTALL_DIR="$SCRIPT_DIR/opencv/install"
 BUILD_DIR="$SCRIPT_DIR/opencv/build"
 
@@ -49,6 +49,82 @@ if [ ! -d "$SCRIPT_DIR/opencv/opencv_contrib-$OPENCV_VERSION" ]; then
     rm opencv_contrib.tar.gz
 fi
 
+# --- CUDA 13.x source patches -------------------------------------------------
+# These fix cudev/NPP API changes in CUDA 13 / CCCL 2.x that aren't yet fixed
+# upstream in OpenCV.  Applied once after download; idempotent (sed -i is safe
+# to run on already-patched files).
+
+# Patch 1: cudev detail/tuple.hpp
+#   thrust::tuple in CCCL 2.x (CUDA 13) confuses nvcc C++17 template lookup for
+#   3+-element tuple overloads.  std::tuple is equivalent and works correctly.
+TUPLE_HPP="$SCRIPT_DIR/opencv/opencv_contrib-$OPENCV_VERSION/modules/cudev/include/opencv2/cudev/util/detail/tuple.hpp"
+if [ -f "$TUPLE_HPP" ] && grep -q "thrust/tuple.h" "$TUPLE_HPP"; then
+    echo ">>> Patching cudev/tuple.hpp (thrust::tuple → std::tuple for CCCL 2.x)..."
+    sed -i 's|#include <thrust/tuple.h>|#include <tuple>|'          "$TUPLE_HPP"
+    sed -i 's/using thrust::tuple;/using std::tuple;/'              "$TUPLE_HPP"
+    sed -i 's/using thrust::tuple_size;/using std::tuple_size;/'    "$TUPLE_HPP"
+    sed -i 's/using thrust::get;/using std::get;/'                  "$TUPLE_HPP"
+    sed -i 's/using thrust::tuple_element;/using std::tuple_element;/' "$TUPLE_HPP"
+    sed -i 's/using thrust::make_tuple;/using std::make_tuple;/'    "$TUPLE_HPP"
+    sed -i 's/using thrust::tie;/using std::tie;/'                  "$TUPLE_HPP"
+fi
+
+# Patch 2: cudev ptr2d/zip.hpp
+#   _LIBCUDACXX_BEGIN/END_NAMESPACE_STD was renamed to _CCCL_BEGIN/END_NAMESPACE_STD
+#   in CCCL 2.x.  The CUDA ≥12.4 block in zip.hpp uses the old name.
+ZIP_HPP="$SCRIPT_DIR/opencv/opencv_contrib-$OPENCV_VERSION/modules/cudev/include/opencv2/cudev/ptr2d/zip.hpp"
+if [ -f "$ZIP_HPP" ] && grep -q "_LIBCUDACXX_BEGIN_NAMESPACE_STD" "$ZIP_HPP"; then
+    echo ">>> Patching cudev/zip.hpp (_LIBCUDACXX → _CCCL namespace macros)..."
+    sed -i 's/_LIBCUDACXX_BEGIN_NAMESPACE_STD/_CCCL_BEGIN_NAMESPACE_STD/g' "$ZIP_HPP"
+    sed -i 's/_LIBCUDACXX_END_NAMESPACE_STD/_CCCL_END_NAMESPACE_STD/g'     "$ZIP_HPP"
+fi
+
+# Patch 3: core/private.cuda.hpp
+#   nppGetStreamContext() was removed in NPP 13.x.  Populate NppStreamContext
+#   manually via cudaGetDeviceProperties instead.
+PRIVATE_CUDA_HPP="$SCRIPT_DIR/opencv/opencv-$OPENCV_VERSION/modules/core/include/opencv2/core/private.cuda.hpp"
+if [ -f "$PRIVATE_CUDA_HPP" ] && grep -q "nppGetStreamContext" "$PRIVATE_CUDA_HPP"; then
+    echo ">>> Patching private.cuda.hpp (nppGetStreamContext removed in NPP 13.x)..."
+    python3 - "$PRIVATE_CUDA_HPP" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+old = (
+    '            nppStreamContext = {};\n'
+    '            nppSafeCall(nppGetStreamContext(&nppStreamContext));\n'
+    '            nppStreamContext.hStream = newStream;\n'
+    '            cudaSafeCall(cudaStreamGetFlags(nppStreamContext.hStream, &nppStreamContext.nStreamFlags));'
+)
+new = (
+    '            nppStreamContext = {};\n'
+    '#if NPP_VERSION < 13000\n'
+    '            nppSafeCall(nppGetStreamContext(&nppStreamContext));\n'
+    '            nppStreamContext.hStream = newStream;\n'
+    '            cudaSafeCall(cudaStreamGetFlags(nppStreamContext.hStream, &nppStreamContext.nStreamFlags));\n'
+    '#else\n'
+    '            // nppGetStreamContext removed in NPP 13.x\n'
+    '            nppStreamContext.hStream = newStream;\n'
+    '            cudaSafeCall(cudaGetDevice(&nppStreamContext.nCudaDeviceId));\n'
+    '            cudaDeviceProp props = {};\n'
+    '            cudaSafeCall(cudaGetDeviceProperties(&props, nppStreamContext.nCudaDeviceId));\n'
+    '            nppStreamContext.nMultiProcessorCount             = props.multiProcessorCount;\n'
+    '            nppStreamContext.nMaxThreadsPerMultiProcessor     = props.maxThreadsPerMultiProcessor;\n'
+    '            nppStreamContext.nMaxThreadsPerBlock              = props.maxThreadsPerBlock;\n'
+    '            nppStreamContext.nSharedMemPerBlock               = props.sharedMemPerBlock;\n'
+    '            nppStreamContext.nCudaDevAttrComputeCapabilityMajor = props.major;\n'
+    '            nppStreamContext.nCudaDevAttrComputeCapabilityMinor = props.minor;\n'
+    '            cudaSafeCall(cudaStreamGetFlags(nppStreamContext.hStream, &nppStreamContext.nStreamFlags));\n'
+    '#endif'
+)
+if old in text:
+    open(path, 'w').write(text.replace(old, new, 1))
+    print("  applied.")
+else:
+    print("  already patched or pattern not found.")
+PYEOF
+fi
+# ------------------------------------------------------------------------------
+
 # Detect CUDA compute capability from GPU
 CUDA_ARCH=""
 if command -v nvidia-smi &>/dev/null; then
@@ -61,14 +137,15 @@ if [ -z "$CUDA_ARCH" ]; then
 fi
 
 echo ">>> Configuring OpenCV with CUDA (arch=$CUDA_ARCH)..."
+rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
-# CUDA 12.0 requires GCC <= 12 as host compiler
+# CUDA 13.x supports GCC 13; keep gcc-12 fallback for older BSPs
 CUDA_HOST_COMPILER=""
 if [ -x /usr/bin/gcc-12 ]; then
     CUDA_HOST_COMPILER="/usr/bin/gcc-12"
-    echo "Using GCC 12 as CUDA host compiler (CUDA 12.0 doesn't support GCC 13+)"
+    echo "Using GCC 12 as CUDA host compiler"
 fi
 
 cmake \
@@ -77,6 +154,8 @@ cmake \
     ${CUDA_HOST_COMPILER:+-DCUDA_HOST_COMPILER="$CUDA_HOST_COMPILER"} \
     -DOPENCV_EXTRA_MODULES_PATH="$SCRIPT_DIR/opencv/opencv_contrib-$OPENCV_VERSION/modules" \
     \
+    -DCMAKE_CUDA_STANDARD=17 \
+    -DCUDA_NVCC_FLAGS="-std=c++17 --expt-relaxed-constexpr" \
     -DWITH_CUDA=ON \
     -DCUDA_ARCH_BIN="$CUDA_ARCH" \
     -DCUDA_FAST_MATH=ON \
