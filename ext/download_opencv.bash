@@ -15,7 +15,27 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-OPENCV_VERSION="4.13.0"
+# Detect CUDA major version (nvcc is authoritative; fall back to 12)
+CUDA_MAJOR=12
+if command -v nvcc &>/dev/null; then
+    CUDA_MAJOR=$(nvcc --version | grep -oP 'release \K[0-9]+' | head -1)
+fi
+echo "Detected CUDA major version: $CUDA_MAJOR"
+
+# CUDA 12 → OpenCV 4.10.0 (no upstream patches needed)
+# CUDA 13+ → OpenCV 4.13.0 (requires three source patches for CCCL 2.x / NPP 13.x)
+if [ "$CUDA_MAJOR" -ge 13 ]; then
+    OPENCV_VERSION="4.13.0"
+    CUDA13_CMAKE_FLAGS=(
+        "-DCMAKE_CUDA_STANDARD=17"
+        "-DCUDA_NVCC_FLAGS=-std=c++17 --expt-relaxed-constexpr"
+    )
+else
+    OPENCV_VERSION="4.10.0"
+    CUDA13_CMAKE_FLAGS=()
+fi
+echo "Using OpenCV $OPENCV_VERSION"
+
 INSTALL_DIR="$SCRIPT_DIR/opencv/install"
 BUILD_DIR="$SCRIPT_DIR/opencv/build"
 
@@ -53,6 +73,7 @@ fi
 # These fix cudev/NPP API changes in CUDA 13 / CCCL 2.x that aren't yet fixed
 # upstream in OpenCV.  Applied once after download; idempotent (sed -i is safe
 # to run on already-patched files).
+if [ "$CUDA_MAJOR" -ge 13 ]; then
 
 # Patch 1: cudev detail/tuple.hpp
 #   thrust::tuple in CCCL 2.x (CUDA 13) confuses nvcc C++17 template lookup for
@@ -123,6 +144,8 @@ else:
     print("  already patched or pattern not found.")
 PYEOF
 fi
+
+fi  # end CUDA 13+ patches
 # ------------------------------------------------------------------------------
 
 # Detect CUDA compute capability from GPU
@@ -154,8 +177,7 @@ cmake \
     ${CUDA_HOST_COMPILER:+-DCUDA_HOST_COMPILER="$CUDA_HOST_COMPILER"} \
     -DOPENCV_EXTRA_MODULES_PATH="$SCRIPT_DIR/opencv/opencv_contrib-$OPENCV_VERSION/modules" \
     \
-    -DCMAKE_CUDA_STANDARD=17 \
-    -DCUDA_NVCC_FLAGS="-std=c++17 --expt-relaxed-constexpr" \
+    "${CUDA13_CMAKE_FLAGS[@]}" \
     -DWITH_CUDA=ON \
     -DCUDA_ARCH_BIN="$CUDA_ARCH" \
     -DCUDA_FAST_MATH=ON \
