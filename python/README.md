@@ -362,6 +362,55 @@ flowchart TD
 
 ---
 
+## usb_info.py
+
+*USB camera → TensorPythonInterface → InfoFrame message channel*
+
+Demonstrates pushing `InfoFrame`s (JSON strings) downstream from a Python
+consumer and reading them in a separate thread via `InfoFrameFilter` + `EventFd`.
+
+The Python consumer counts incoming `TensorFrame`s and every `--interval` frames
+(default 10) pushes `limef.InfoFrame(json.dumps({"frames": N}))` into the pipeline
+output.  A reader thread blocks on `select()` waiting for the `EventFd` signal, then
+drains `InfoFrameFilter.popMessage()`.  No video output — purely a message-channel demo.
+
+```
+python3 apps/python/usb_info.py [--device /dev/video0]
+                                 [--width 640] [--height 480] [--fps 30]
+                                 [--interval 10]
+```
+
+### Pipeline
+
+```mermaid
+flowchart TD
+    camtr[USBCameraTR]
+    d2t(Dec2TensorFF CPU)
+    pyif[TensorPythonInterface]
+    infoff(InfoFrameFilter)
+    reader[reader thread]
+
+    camtr --- d2t
+    d2t -->|TensorFrame CPU| pyif
+    pyif ---|InfoFrame every N frames| infoff
+    infoff -.->|popMessage via EventFd| reader
+
+    classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
+    classDef pytr   fill:#7b5ea7,stroke:#4a3570,color:#fff
+    classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
+    class camtr,reader thread
+    class pyif pytr
+    class d2t,infoff ff
+```
+
+`TensorPythonInterface` acts as a thread boundary: `TensorFrame`s arrive from the
+camera; the Python consumer counts them and every N frames calls
+`client.push(limef.InfoFrame(...))`.  The `InfoFrameFilter` intercepts those frames,
+queues the string payload, and signals the `EventFd`.  The reader thread wakes from
+`select()`, calls `efd.clear()`, and drains the queue with `popMessage()`.
+
+---
+
 ## usb_cpu_gpu.py
 
 *Live video processing on both CPU and GPU; processing stages can be switched and toggled on and off*
