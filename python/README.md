@@ -386,28 +386,34 @@ python3 apps/python/usb_info.py [--device /dev/video0]
 flowchart TD
     camtr[USBCameraTR]
     d2t(Dec2TensorFF CPU)
+    putff(PutInfoFrameFilter)
+    timer[timer thread]
     pyif[TensorPythonInterface]
     infoff(InfoFrameFilter)
     reader[reader thread]
 
     camtr --- d2t
-    d2t -->|TensorFrame CPU| pyif
+    d2t --- putff
+    timer -.->|put msg every 10 s| putff
+    putff -->|TensorFrame + InfoFrame| pyif
     pyif ---|InfoFrame every N frames| infoff
     infoff -.->|popMessage via EventFd| reader
 
     classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
     classDef pytr   fill:#7b5ea7,stroke:#4a3570,color:#fff
     classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
-    class camtr,reader thread
+    class camtr,timer,reader thread
     class pyif pytr
-    class d2t,infoff ff
+    class d2t,putff,infoff ff
 ```
 
-`TensorPythonInterface` acts as a thread boundary: `TensorFrame`s arrive from the
-camera; the Python consumer counts them and every N frames calls
-`client.push(limef.InfoFrame(...))`.  The `InfoFrameFilter` intercepts those frames,
-queues the string payload, and signals the `EventFd`.  The reader thread wakes from
-`select()`, calls `efd.clear()`, and drains the queue with `popMessage()`.
+A timer thread calls `put_ff.put("message N")` every 10 s.  `PutInfoFrameFilter`
+queues the string and emits it as an `InfoFrame` (on the driving thread) just before
+the next `TensorFrame`.  `TensorPythonInterface.pull()` surfaces both frame types to
+the Python consumer: injected `InfoFrame`s are captured; every N `TensorFrame`s the
+consumer pushes a merged `InfoFrame({"frames": N, "injected": ...})` downstream.
+`InfoFrameFilter` queues it and signals the `EventFd`; the reader thread drains
+`popMessage()`.
 
 ---
 

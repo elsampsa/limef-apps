@@ -2,26 +2,34 @@
 """
 apps/python/usb_info.py
 
-USB camera → TensorPythonInterface → InfoFrameFilter demo.
+USB camera → PutInfoFrameFilter → TensorPythonInterface → InfoFrameFilter demo.
 
-The Python consumer counts incoming TensorFrames and every 10 frames pushes
-an InfoFrame carrying JSON {"frames": N} downstream.  A separate reader thread
-waits on an EventFd and prints each message as it arrives.
+Two message sources flow through the pipeline:
 
-No video output — this demo is purely about the InfoFrame message channel.
+1. A timer thread calls put_ff.put("message N") every --inject-interval seconds.
+   PutInfoFrameFilter emits this as an InfoFrame just before the next TensorFrame.
+   TensorPythonInterface.pull() surfaces it; the consumer captures it and merges
+   it into the next outgoing InfoFrame.
+
+2. The consumer itself counts TensorFrames and pushes an InfoFrame every
+   --frame-interval frames carrying {"frames": N, "injected": "..."}.
+
+InfoFrameFilter downstream catches all outgoing InfoFrames and queues them.
+A reader thread wakes via EventFd and drains popMessage().
 
 Pipeline:
     USBCameraThread
       → DecodedToTensorFrameFilter
+      → PutInfoFrameFilter         ← timer thread: put("message N") every 10 s
       → TensorPythonInterface
-          ↑ Python consumer: count frames, push InfoFrame every 10
+          ↑ consumer: on InfoFrame capture msg; every N TensorFrames push merged InfoFrame
       → InfoFrameFilter(efd)
           ↑ reader thread: select on efd, popMessage()
 
 Usage:
     source go_debug.bash
     python3 apps/python/usb_info.py
-    python3 apps/python/usb_info.py --device /dev/video2
+    python3 apps/python/usb_info.py --inject-interval 5 --frame-interval 20
 """
 
 import sys
@@ -41,13 +49,15 @@ def main():
         description='limef USB camera → InfoFrame message channel demo',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument('-d', '--device',  default='/dev/video0', metavar='DEV',
+    p.add_argument('-d', '--device',          default='/dev/video0', metavar='DEV',
                    help='V4L2 camera device')
-    p.add_argument('-w', '--width',   type=int, default=640)
-    p.add_argument('-H', '--height',  type=int, default=480)
-    p.add_argument('-f', '--fps',     type=int, default=30)
-    p.add_argument('--interval',      type=int, default=10, metavar='N',
+    p.add_argument('-w', '--width',            type=int, default=640)
+    p.add_argument('-H', '--height',           type=int, default=480)
+    p.add_argument('-f', '--fps',              type=int, default=30)
+    p.add_argument('--frame-interval',         type=int, default=10, metavar='N',
                    help='push an InfoFrame every N TensorFrames')
+    p.add_argument('--inject-interval',        type=float, default=10.0, metavar='SECS',
+                   help='inject a put() message every SECS seconds')
     args = p.parse_args()
 
     SLOT       = 1
@@ -56,9 +66,10 @@ def main():
     print("==============================================")
     print("  USB Camera → InfoFrame message channel")
     print("==============================================")
-    print(f"Device:     {args.device}")
-    print(f"Resolution: {args.width}x{args.height} @ {args.fps} fps")
-    print(f"Interval:   every {args.interval} frames")
+    print(f"Device:          {args.device}")
+    print(f"Resolution:      {args.width}x{args.height} @ {args.fps} fps")
+    print(f"Frame interval:  every {args.frame_interval} frames")
+    print(f"Inject interval: every {args.inject_interval:.0f} s")
     print("==============================================\n")
 
     # ── Camera source ──────────────────────────────────────────────────────────
@@ -71,6 +82,9 @@ def main():
     camera = limef.USBCameraThread('usb-camera', cam_ctx)
     d2t    = limef.DecodedToTensorFrameFilter('d2t', limef.CHANNEL_ORDER_RGB)
 
+    # ── PutInfoFrameFilter — injects messages from the timer thread ────────────
+    put_ff = limef.PutInfoFrameFilter('put')
+
     # ── TensorPythonInterface ──────────────────────────────────────────────────
     pyf    = limef.TensorPythonInterface(stack_size=10, leaky=True,
                                          hw_accel=limef.HWACCEL_NONE, fifo_size=0)
@@ -81,12 +95,29 @@ def main():
     info = limef.InfoFrameFilter('info', efd)
 
     # ── Wire pipeline ──────────────────────────────────────────────────────────
-    camera.cc(d2t).cc(pyf.getInput())
+    camera.cc(d2t).cc(put_ff).cc(pyf.getInput())
     pyf.getOutput().cc(info)
 
+    # ── Timer thread — injects messages upstream via put_ff ────────────────────
+    stop_event    = threading.Event()
+    inject_count  = [0]
+
+    def injector():
+        while not stop_event.is_set():
+            stop_event.wait(timeout=args.inject_interval)
+            if stop_event.is_set():
+                break
+            inject_count[0] += 1
+            msg = f"message {inject_count[0]}"
+            put_ff.put(msg)
+            print(f"[injector] put: {msg!r}")
+
+    injector_thread = threading.Thread(target=injector, daemon=True,
+                                       name='injector')
+
     # ── Consumer thread ────────────────────────────────────────────────────────
-    stop_event  = threading.Event()
-    frame_count = [0]
+    frame_count   = [0]
+    last_injected = [None]   # most recent message received from put_ff
 
     def consumer():
         while not stop_event.is_set():
@@ -95,9 +126,15 @@ def main():
             if frame is None:
                 continue
 
-            # Pass StreamFrames through (codec init signal).
+            # StreamFrame: pass through so downstream sees codec init.
             if isinstance(frame, limef.StreamFrame):
                 client.push(frame)
+                continue
+
+            # InfoFrame injected by PutInfoFrameFilter: capture and echo it.
+            if isinstance(frame, limef.InfoFrame):
+                last_injected[0] = frame.message
+                print(f"[consumer] received injected: {frame.message!r}")
                 continue
 
             if not isinstance(frame, limef.TensorFrame):
@@ -105,9 +142,11 @@ def main():
 
             frame_count[0] += 1
 
-            if frame_count[0] % args.interval == 0:
-                msg = json.dumps({"frames": frame_count[0]})
-                client.push(limef.InfoFrame(msg))
+            if frame_count[0] % args.frame_interval == 0:
+                payload = {"frames": frame_count[0]}
+                if last_injected[0] is not None:
+                    payload["injected"] = last_injected[0]
+                client.push(limef.InfoFrame(json.dumps(payload)))
 
     consumer_thread = threading.Thread(target=consumer, daemon=True,
                                        name='tensor-consumer')
@@ -119,17 +158,18 @@ def main():
             r, _, _ = select.select([fd], [], [], 0.2)
             if not r:
                 continue
-            efd.clear()                     # drain the eventfd counter
+            efd.clear()
             while info.hasMessage():
                 data = json.loads(info.popMessage())
-                print(f"[reader] {data}")
+                print(f"[reader]   {data}")
 
     reader_thread = threading.Thread(target=reader, daemon=True,
                                      name='info-reader')
 
-    # ── Start (downstream filters need no explicit start; camera last) ─────────
+    # ── Start ──────────────────────────────────────────────────────────────────
     consumer_thread.start()
     reader_thread.start()
+    injector_thread.start()
     camera.start()
 
     print("Running — press Ctrl+C to stop.\n")
@@ -150,8 +190,10 @@ def main():
 
     consumer_thread.join(timeout=2.0)
     reader_thread.join(timeout=1.0)
+    injector_thread.join(timeout=args.inject_interval + 1.0)
 
-    print(f"\nDone.  {frame_count[0]} TensorFrames received.")
+    print(f"\nDone.  {frame_count[0]} TensorFrames, "
+          f"{inject_count[0]} injected messages.")
 
 
 if __name__ == '__main__':
