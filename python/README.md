@@ -224,6 +224,67 @@ flowchart TD
 
 ---
 
+## tensor_if_test.py
+
+*Minimal smoke test for the GPU TensorFrame → TensorPythonInterface path*
+
+Reads a local file, software-decodes it, converts to NV12, uploads to the GPU,
+converts to a CUDA RGB tensor, and passes it through `TensorPythonInterface` to a
+Python consumer thread.  The consumer prints each frame's GPU status and shape,
+then exits after `--frames` frames.
+
+Use this to verify that the CUDA runtime, `DecodedUploadFrameFilter`,
+`DecodedToTensorFrameFilter`, and `TensorPythonInterface` all work end-to-end on
+the current platform — including Jetson, where FFmpeg's own CUDA hwcontext is
+intentionally disabled.
+
+```
+python3 apps/python/tensor_if_test.py [--file PATH] [--frames N]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--file PATH` | `fixtures/jontxu.mkv` | Input video file |
+| `--frames N` | 10 | Stop after this many `TensorFrame`s |
+
+### Pipeline
+
+```mermaid
+flowchart TD
+    srctr[MediaFileTR]
+    decff(DecFF sw)
+    scale(SwScaleFF NV12)
+    upload(DecodedUploadFF CUDA)
+    d2t(Dec2TensorFF RGB)
+    pyif[TensorPythonInterface CUDA]
+    py[Python consumer]
+
+    srctr ---|PacketFrame| decff
+    decff ---|DecodedFrame YUV| scale
+    scale ---|DecodedFrame NV12| upload
+    upload ---|DecodedFrame CUDA| d2t
+    d2t -->|TensorFrame CUDA| pyif
+    pyif -.->|pull / push| py
+
+    classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
+    classDef pytr   fill:#7b5ea7,stroke:#4a3570,color:#fff
+    classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
+    class srctr thread
+    class pyif pytr
+    class decff,scale,upload,d2t ff
+    class py pytr
+```
+
+`TensorPythonInterface` is constructed with `hw_accel=HWACCEL_CUDA` so its
+internal `TensorFrameFifo` pre-allocates stack frames in GPU memory
+(`BufferLocation::CUDA`).  Frames arrive already on the GPU from
+`DecodedToTensorFrameFilter`, so no CPU↔GPU transfer happens at the Python
+boundary.  The GPU path relies on the CUDA runtime (`cudaGetDeviceCount`) only —
+FFmpeg's own CUDA hwcontext (`CONFIG_CUDA`) is not required, making it suitable
+for Jetson builds where FFmpeg CUDA is disabled.
+
+---
+
 ## usb_gpu_pipeline_cuda.py
 
 *USB camera → CUDA GPU tensors → RTSP (NVENC or V4L2 M2M encoder)*
