@@ -289,6 +289,13 @@ def main():
                    help="Verbose dump after encoder (encoded packets)")
     p.add_argument("--debug",       action="store_true",
                    help="Set WebRTCServerThread log level to DEBUG (raw SDP exchange)")
+    p.add_argument("--stun",        default="", metavar="URL",
+                   help="STUN server URL, e.g. stun:100.84.182.90:3478 (default: "
+                        "disabled). Needed for Firefox over Tailscale: Firefox "
+                        "filters 100.64.0.0/10 from ICE host candidates, so "
+                        "without a STUN server reachable on the tailnet it never "
+                        "offers its Tailscale address and ICE fails. The STUN "
+                        "server itself must already be running at that address.")
     args = p.parse_args()
 
     if not os.path.exists(args.file):
@@ -328,7 +335,8 @@ def main():
     # ── WebRTC muxer + server ───────────────────────────────────────────────────
     rtp  = limef.WebRTCMuxerFrameFilter("webrtc-muxer")
     wrtc = limef.WebRTCServerThread("webrtc", port=wport,
-                                    stack_size=200, fifo_size=400)
+                                    stack_size=200, fifo_size=400,
+                                    stun_server=args.stun)
     chain.cc(rtp).cc(wrtc.getInput())
 
     # ── banner ──────────────────────────────────────────────────────────────────
@@ -344,6 +352,7 @@ def main():
     print(f"WebRTC port:  {wport}")
     print(f"HTTP port:    {hport}")
     print(f"LAN IP:       {lan_ip}")
+    print(f"STUN server:  {args.stun if args.stun else 'disabled'}")
     print()
     print("Open in browser on THIS machine:")
     print(f"  http://localhost:{hport}/?{lan_ip}:{wport}&uuid={args.uuid}")
