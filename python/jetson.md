@@ -25,6 +25,7 @@ pipelines.  Each one isolates a specific hardware block:
 | `jetson_decode.py` | NVDEC hardware decode → GPU scale → SW encode → RTSP |
 | `jetson_encode.py` | SW decode → CUDA upload → NVENC encode → SW decode verify |
 | `jetson_rtsp.py` | SW decode → CUDA upload → NVENC encode → RTSP |
+| `jetson_webrtc.py` | SW decode → [CUDA upload → NVENC \| SW VP8] → WebRTC → browser |
 
 The reason they are split up is intentional: when debugging hardware codec
 issues on Jetson it is much easier to have one moving part at a time.
@@ -63,7 +64,7 @@ flowchart TD
     counter(CountDecodedFF)
     png(WritePNGFF\noptional --png)
 
-    argus --> dump --> counter --> png
+    argus --- dump --- counter --- png
 
     classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
     classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
@@ -99,7 +100,7 @@ flowchart TD
     counter(CountDecodedFF)
     png(WritePNGFF\noptional --png)
 
-    argus --> scale --> download --> counter --> png
+    argus --- scale --- download --- counter --- png
 
     classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
     classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
@@ -143,7 +144,7 @@ flowchart TD
     rtp(RTSPMuxerFF)
     rtsp[RTSPServerThread]
 
-    argus --> scale --> download --> dt --> encoder --> rtp --> rtsp
+    argus --- scale --- download --> dt --- encoder --- rtp --> rtsp
 
     classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
     classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
@@ -164,7 +165,7 @@ flowchart TD
     rtp(RTSPMuxerFF)
     rtsp[RTSPServerThread]
 
-    argus --> scale --> download --> encoder --> rtp --> rtsp
+    argus --- scale --- download --- encoder --- rtp --> rtsp
 
     classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
     classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
@@ -199,7 +200,7 @@ flowchart TD
     dump(DumpFF\ndecoded frames)
     writer(WritePNGFF)
 
-    src --> annexb --> dumpp --> dec --> dump --> writer
+    src --- annexb --- dumpp --- dec --- dump --- writer
 
     classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
     classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
@@ -239,7 +240,7 @@ flowchart TD
     rtp(RTSPMuxerFF)
     rtsp[RTSPServerThread]
 
-    src --> h264strip --> dec --> scale --> download --> encoder --> rtp --> rtsp
+    src --- h264strip --- dec --- scale --- download --- encoder --- rtp --> rtsp
 
     classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
     classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
@@ -274,7 +275,7 @@ flowchart TD
     sw_dec2(DecodingFF\nFFmpeg SW · CPU YUV420P)
     png(WritePNGFF)
 
-    src --> sw_dec1 --> upload --> to_nv12 --> encoder --> sw_dec2 --> png
+    src --- sw_dec1 --- upload --- to_nv12 --- encoder --- sw_dec2 --- png
 
     classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
     classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
@@ -312,12 +313,101 @@ flowchart TD
     rtp(RTSPMuxerFF)
     rtsp[RTSPServerThread]
 
-    src --> sw_dec --> upload --> to_nv12 --> encoder --> rtp --> rtsp
+    src --- sw_dec --- upload --- to_nv12 --- encoder --- rtp --> rtsp
 
     classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
     classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
     class src,rtsp thread
     class sw_dec,upload,to_nv12,encoder,rtp ff
+```
+
+---
+
+## jetson_webrtc.py
+
+*File → SW decode → selectable encode → WebRTC → browser*
+
+Browser streaming companion to `jetson_rtsp.py`.  Reads a media file, decodes
+with FFmpeg SW, and re-encodes with one of three backends before serving via
+WebRTC.  nginx serves the player HTML on `--http-port`.
+
+| `--encoder` | Backend | Codec | Notes |
+|-------------|---------|-------|-------|
+| `v4l2` (default) | Jetson V4L2 NVENC | H.264 Baseline/4.1 | Requires `/dev/v4l2-nvenc`; WebRTC-safe profile+level |
+| `cuda` | FFmpeg CUDA NVENC | H.264 Baseline | Requires NVIDIA GPU |
+| `sw` | FFmpeg libvpx | VP8 | Any host; no GPU needed |
+
+```bash
+python3 apps/python/jetson_webrtc.py --file fixtures/video.mp4
+python3 apps/python/jetson_webrtc.py --file fixtures/video.mp4 --encoder v4l2 --loop
+python3 apps/python/jetson_webrtc.py --file fixtures/video.mp4 --encoder cuda --bitrate 4000000
+python3 apps/python/jetson_webrtc.py --file fixtures/video.mp4 --encoder sw
+```
+
+The startup banner prints ready-to-use browser URLs.  The frontend
+(`webrtc_html_demo/static/index.html`) accepts a bare positional server spec so
+you can open it from any machine and point it at the Jetson:
+
+```
+# served by this Jetson's nginx, opened remotely
+http://myjetson:9091/?myjetson:9090&uuid=stream
+
+# HTML served elsewhere, WebRTC stream from Jetson
+http://laptop:9091/?myjetson:9090&uuid=stream
+```
+
+### V4L2 WebRTC encoder notes
+
+H.264 from the Jetson V4L2 NVENC driver requires two explicit control calls that
+the driver does not default correctly:
+
+- `h264_profile = V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE` — Firefox requires
+  Constrained Baseline; the driver defaults to High.
+- `h264_level = V4L2_MPEG_VIDEO_H264_LEVEL_4_1` — without this the driver
+  emits `level_idc = 0` which produces an invalid `profile-level-id` in the
+  WebRTC SDP offer and browsers reject it.
+
+Both are set in `jetson_webrtc.py`; `extractH264Extradata()` in limef always
+populates `codec_params_->extradata` regardless of `global_header` so the SDP
+`sprop-parameter-sets` is always present.
+
+### Pipeline (v4l2 / cuda)
+
+```mermaid
+flowchart TD
+    src[MediaFileThread]
+    sw_dec(DecodingFF\nFFmpeg SW · CPU YUV420P)
+    upload(DecodedUploadFF\nCPU YUV420P → CUDA)
+    to_nv12(CUDAScaleFF\nYUV420P → NV12)
+    encoder(EncodingFF\nV4L2NVEncoder H.264\nor FFmpeg CUDA NVENC)
+    rtp(WebRTCMuxerFF)
+    wrtc[WebRTCServerThread]
+
+    src --- sw_dec --- upload --- to_nv12 --- encoder --- rtp --> wrtc
+
+    classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
+    classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
+    class src,wrtc thread
+    class sw_dec,upload,to_nv12,encoder,rtp ff
+```
+
+### Pipeline (sw / VP8)
+
+```mermaid
+flowchart TD
+    src[MediaFileThread]
+    sw_dec(DecodingFF\nFFmpeg SW · CPU YUV420P)
+    swscale(SwScaleFF\nensure YUV420P)
+    encoder(EncodingFF\nlibvpx VP8)
+    rtp(WebRTCMuxerFF)
+    wrtc[WebRTCServerThread]
+
+    src --- sw_dec --- swscale --- encoder --- rtp --> wrtc
+
+    classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
+    classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
+    class src,wrtc thread
+    class sw_dec,swscale,encoder,rtp ff
 ```
 
 ---

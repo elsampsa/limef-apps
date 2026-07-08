@@ -36,10 +36,59 @@ const status = document.getElementById("status");
 const btn    = document.getElementById("btn");
 const logbox = document.getElementById("logbox");
 
-const params    = new URLSearchParams(window.location.search);
-const uuid      = "/" + (params.get("uuid") || "stream");
-const wport     = params.get("wport") || "8090";
-const sigBase   = `http://${window.location.hostname}:${wport}`;
+const params = new URLSearchParams(window.location.search);
+
+// Server resolution — three styles are supported:
+//
+//   Bare positional (first query segment has no '='):
+//     ?myjetson                → host=myjetson,       port=9090
+//     ?myjetson:9090           → host=myjetson,       port=9090
+//     ?myjetson&uuid=mystream  → host + uuid override
+//
+//   Named param (can combine with uuid / wport):
+//     ?server=myjetson
+//     ?server=myjetson:9090
+//
+//   Legacy (backward-compatible):
+//     ?wport=9090                    → host = page hostname, port 9090
+//     ?uuid=stream&wport=9090
+//
+// Without any override: host = window.location.hostname, port = 9090.
+
+let sigHost = window.location.hostname;
+let sigPort = "9090";
+
+const rawQuery = window.location.search.slice(1);   // strip leading '?'
+const firstSeg = rawQuery.split("&")[0];             // segment before first '&'
+
+if (firstSeg && !firstSeg.includes("=")) {
+    // bare positional server spec
+    const colonIdx = firstSeg.indexOf(":");
+    if (colonIdx !== -1) {
+        sigHost = firstSeg.slice(0, colonIdx);
+        sigPort = firstSeg.slice(colonIdx + 1);
+    } else {
+        sigHost = firstSeg;
+    }
+} else {
+    // named ?server= param (optional)
+    const serverParam = params.get("server");
+    if (serverParam) {
+        const colonIdx = serverParam.indexOf(":");
+        if (colonIdx !== -1) {
+            sigHost = serverParam.slice(0, colonIdx);
+            sigPort = serverParam.slice(colonIdx + 1);
+        } else {
+            sigHost = serverParam;
+        }
+    }
+}
+// ?wport= always wins over the port resolved above (backward compat)
+const wportParam = params.get("wport");
+if (wportParam) sigPort = wportParam;
+
+const uuid    = "/" + (params.get("uuid") || "stream");
+const sigBase = `http://${sigHost}:${sigPort}`;
 
 const MAX_LOG_LINES = 200;
 var log_lines = 0;
@@ -253,7 +302,7 @@ function startStatsTicker() {
 // ── startup ───────────────────────────────────────────────────────────────────
 
 window.onload = () => {
-    log("log-info", `page loaded  uuid=${uuid}  signaling=${sigBase}`);
+    log("log-info", `page loaded  uuid=${uuid}  signaling=${sigBase}  (page host: ${window.location.hostname})`);
     setStatus("ready — click Connect to start");
 };
 </script>
