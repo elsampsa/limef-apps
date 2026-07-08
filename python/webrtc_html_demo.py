@@ -32,11 +32,13 @@ the chain.
 
 Pipelines
 ---------
-File / RTSP:
-  [LiveStreamThread | MediaFileThread]
-       → WebRTCMuxerFrameFilter   (CodecAssert validates, AnnexB, RTP mux)
-       → WebRTCServerThread       HTTP signaling on WEBRTC_PORT
-       → nginx (static HTML)      HTTP on HTTP_PORT
+Sources and encoders are independent classes — pick one of each and wire them:
+
+  FileSource      → MuteAudio → Decode  ─┐
+                                          ├─ VP8Encoder  ─┐
+  USBCameraSource ──────────────────────-─┘               ├─ WebRTCMuxerFrameFilter → WebRTCServerThread
+                                          ├─ CUDAEncoder ─┘
+                                         (chosen by --hw-accel)
 
 USB + --hw-accel (H.264 NVENC):
   USBCameraThread
@@ -52,27 +54,27 @@ USB default (VP8 libvpx, software):
 
 Usage:
     python3 apps/python/webrtc_html_demo.py --file video.mp4
-    python3 apps/python/webrtc_html_demo.py --rtsp rtsp://user:pass@cam/stream
-    python3 apps/python/webrtc_html_demo.py --usb /dev/video0 [--hw-accel]
+    python3 apps/python/webrtc_html_demo.py --file video.mp4 --hw-accel
+    python3 apps/python/webrtc_html_demo.py --usb /dev/video0
+    python3 apps/python/webrtc_html_demo.py --usb /dev/video0 --hw-accel
 
 Options:
-    --rtsp         URL   RTSP stream URL
-    --file         PATH  local media file
-    --usb          DEV   V4L2 device (default /dev/video0)
+    --file         PATH  local media file (decoded + re-encoded)
+    --usb          DEV   V4L2 device, e.g. /dev/video0
+    --hw-accel           use NVENC H.264 encoder instead of libvpx VP8
     --webrtc-port        WebRTC signaling HTTP port (default 9090)
     --http-port          nginx static-file HTTP port (default 9091)
     --uuid               stream UUID (default 'stream', exposed as /stream)
-    --fps                playback/capture rate for file/USB (default 25)
-    --loop               loop file source
+    --fps                playback/capture rate (default 25)
     --width              USB capture width (default 640)
     --height             USB capture height (default 480)
-    --bitrate            USB encoder bitrate in bps (default 4_000_000)
-    --hw-accel           USB: use NVENC H.264 instead of libvpx VP8 (software)
+    --bitrate            encoder bitrate in bps (default 4_000_000)
 
 Press Ctrl+C to stop.
 """
 
 import os
+import sys
 import time
 import shlex
 import argparse
@@ -156,83 +158,112 @@ def _stop_nginx(proc: subprocess.Popen) -> None:
         proc.wait()
 
 
-# ── pipeline builders ─────────────────────────────────────────────────────────
+# ── sources ───────────────────────────────────────────────────────────────────
+# All sources expose:
+#   .chain  — tail framefilter producing DecodedFrames; connect an encoder here
+#   .start() / .stop()
 
-def _build_file_source(args):
-    ctx      = limef.MediaFileContext(args.file, SLOT)
-    ctx.fps  = args.fps
-    ctx.loop = 0 if args.loop else -1
-    source   = limef.MediaFileThread("source", ctx)
-    return source, None   # (source_thread, encoder_ff_or_None)
+class FileSource:
+    """MediaFileThread → MuteAudioFrameFilter → DecodingFrameFilter.
 
-
-def _build_rtsp_source(args):
-    ctx    = limef.LiveStreamContext(args.rtsp, SLOT)
-    source = limef.LiveStreamThread("source", ctx)
-    return source, None
-
-
-class USBSource:
-    """USB camera pipeline unit: thread + SwScale + encoder, all owned as attributes.
-
-    cc() stores raw C++ pointers — Python must hold every chain object for the
-    pipeline's entire lifetime.  Owning them as instance attributes achieves this:
-    they live exactly as long as the USBSource instance does.
-
-    Usage::
-
-        src = USBSource(args)          # builds and wires thread→swscale→encoder
-        src.chain.cc(rtp_muxer)        # continue the chain from the encoder tail
-        src.start()
-        ...
-        src.stop()
+    Outputs decoded video frames (audio stripped).  Wire an encoder downstream.
     """
 
     def __init__(self, args):
-        cam_ctx                = limef.USBCameraContext(args.usb, SLOT)
-        cam_ctx.width          = args.width
-        cam_ctx.height         = args.height
-        cam_ctx.fps            = args.fps
-        cam_ctx.capture_format = limef.AV_PIX_FMT_YUYV422  # camera native format
+        self._ctx      = limef.MediaFileContext(args.file, SLOT)
+        self._ctx.fps  = args.fps
+        self._ctx.loop = 0
 
-        enc_params              = limef.FFmpegEncoderParams()
-        enc_params.bitrate      = args.bitrate
-        enc_params.max_b_frames = 0
-        enc_params.gop_size     = max(1, args.fps // 2)
-        if args.hw_accel:
-            # H.264 via NVENC — requires NVIDIA GPU.
-            # Constrained Baseline profile is required for Firefox WebRTC.
-            swscale_fmt         = limef.AV_PIX_FMT_NV12
-            enc_params.codec_id = limef.AV_CODEC_ID_H264
-            enc_params.hw_accel = limef.HWACCEL_CUDA
-            enc_params.preset   = "p1"
-            enc_params.tune     = "ull"
-            enc_params.profile  = "baseline"
-            enc_params.global_header = False # = prepend sps & pps before every intra frame
-        else:
-            # VP8 via libvpx — software encoding.  VP8 is mandatory per RFC 8834.
-            swscale_fmt         = limef.AV_PIX_FMT_YUV420P
-            enc_params.codec_id = limef.AV_CODEC_ID_VP8
+        self._source = limef.MediaFileThread("source", self._ctx)
+        self._mute   = limef.MuteAudioFrameFilter("mute")
+        self._decode = limef.DecodingFrameFilter("decode")
+        self._source.cc(self._mute).cc(self._decode)
+        self.chain = self._decode
 
-        self._thread  = limef.USBCameraThread("source", cam_ctx)
-        self._swscale = limef.SwScaleFrameFilter("swscale", swscale_fmt)
-        self._encoder = limef.EncodingFrameFilter("encoder", enc_params)
-        self._thread.cc(self._swscale).cc(self._encoder)
-        self.chain = self._encoder  # tail: connect downstream filters here
+    def start(self): self._source.start()
+    def stop(self):  self._source.stop()
+
+
+class USBCameraSource:
+    """USBCameraThread outputting raw DecodedFrames (YUYV422).
+
+    Wire an encoder downstream; the encoder's SwScale handles format conversion.
+    """
+
+    def __init__(self, args):
+        self._cam_ctx                = limef.USBCameraContext(args.usb, SLOT)
+        self._cam_ctx.width          = args.width
+        self._cam_ctx.height         = args.height
+        self._cam_ctx.fps            = args.fps
+        self._cam_ctx.capture_format = limef.AV_PIX_FMT_YUYV422
+
+        self._thread = limef.USBCameraThread("source", self._cam_ctx)
+        self.chain   = self._thread
 
     def start(self): self._thread.start()
     def stop(self):  self._thread.stop()
 
 
+# ── encoders ──────────────────────────────────────────────────────────────────
+# All encoders expose:
+#   .input  — first framefilter (SwScaleFrameFilter); connect a source here
+#   .chain  — tail framefilter (EncodingFrameFilter); connect the muxer here
+
+class VP8Encoder:
+    """SwScaleFrameFilter(YUV420P) → EncodingFrameFilter(VP8/libvpx).
+
+    VP8 is mandatory per RFC 8834 and works in every WebRTC-capable browser.
+    """
+
+    def __init__(self, args):
+        self._ep              = limef.FFmpegEncoderParams()
+        self._ep.codec_id     = limef.AV_CODEC_ID_VP8
+        self._ep.bitrate      = args.bitrate
+        self._ep.max_b_frames = 0
+        self._ep.gop_size     = max(1, args.fps // 2)
+
+        self._swscale = limef.SwScaleFrameFilter("swscale", limef.AV_PIX_FMT_YUV420P)
+        self._encode  = limef.EncodingFrameFilter("encode", self._ep)
+        self._swscale.cc(self._encode)
+        self.input = self._swscale
+        self.chain = self._encode
+
+
+class CUDAEncoder:
+    """SwScaleFrameFilter(NV12) → EncodingFrameFilter(H.264 NVENC, baseline).
+
+    Requires an NVIDIA GPU.  Baseline profile is used for Firefox compatibility.
+    """
+
+    def __init__(self, args):
+        self._ep                   = limef.FFmpegEncoderParams()
+        self._ep.codec_id          = limef.AV_CODEC_ID_H264
+        self._ep.hw_accel          = limef.HWACCEL_CUDA
+        self._ep.bitrate           = args.bitrate
+        self._ep.max_b_frames      = 0
+        self._ep.gop_size          = max(1, args.fps // 2)
+        self._ep.preset            = "p1"
+        self._ep.tune              = "ull"
+        self._ep.profile           = "baseline"
+        self._ep.global_header     = False
+        self._ep.options           = {"delay": "0", "rc": "cbr"}
+
+        self._swscale = limef.SwScaleFrameFilter("swscale", limef.AV_PIX_FMT_NV12)
+        self._encode  = limef.EncodingFrameFilter("encode", self._ep)
+        self._swscale.cc(self._encode)
+        self.input = self._swscale
+        self.chain = self._encode
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    sys.stdout.reconfigure(line_buffering=True)
     p = argparse.ArgumentParser(
         description="Limef browser streaming demo (WebRTC + nginx)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     src = p.add_mutually_exclusive_group(required=True)
-    src.add_argument("--rtsp",  metavar="URL",  help="RTSP stream URL")
     src.add_argument("--file",  metavar="PATH", help="local media file")
     src.add_argument("--usb",   metavar="DEV",  help="V4L2 device, e.g. /dev/video0")
 
@@ -244,8 +275,6 @@ def main():
                    help="stream UUID (exposed as /<uuid> on the WebRTC server)")
     p.add_argument("--fps",         type=int, default=25, metavar="FPS",
                    help="playback speed (file) / capture rate (USB)")
-    p.add_argument("--loop",        action="store_true",
-                   help="loop file source")
     p.add_argument("--width",       type=int, default=640,
                    help="USB capture width")
     p.add_argument("--height",      type=int, default=480,
@@ -253,7 +282,7 @@ def main():
     p.add_argument("--bitrate",     type=int, default=4_000_000,
                    help="USB encoder bitrate in bps")
     p.add_argument("--hw-accel",    action="store_true",
-                   help="USB: use NVENC H.264 instead of libvpx VP8 (software)")
+                   help="use NVENC H.264 encoder instead of libvpx VP8 (requires GPU)")
     p.add_argument("--packetdump",   action="store_true",
                    help="log every packet leaving the encoder, before the WebRTC muxer (debug)")
     p.add_argument("--dump",        action="store_true",
@@ -266,20 +295,24 @@ def main():
 
     # ── build source ───────────────────────────────────────────────────────────
     if args.file:
-        source, encoder = _build_file_source(args)
-        chain = source.cc(encoder) if encoder else source
-    elif args.rtsp:
-        source, encoder = _build_rtsp_source(args)
-        chain = source.cc(encoder) if encoder else source
+        source = FileSource(args)
     else:
-        source = USBSource(args)   # owns all chain objects as attributes
-        chain  = source.chain      # encoder tail — connect downstream from here
+        source = USBCameraSource(args)
+
+    # ── build encoder ──────────────────────────────────────────────────────────
+    encoder = CUDAEncoder(args) if args.hw_accel else VP8Encoder(args)
+
+    # ── wire source → encoder ──────────────────────────────────────────────────
+    source.chain.cc(encoder.input)
 
     # ── build RTP muxer + WebRTC server ───────────────────────────────────────
-    rtp         = limef.WebRTCMuxerFrameFilter("webrtc_muxer")
-    wrtc        = limef.WebRTCServerThread("webrtc", port=args.webrtc_port)
-    packetdump  = limef.DumpFrameFilter("packetdump") if args.packetdump else None
-    dump        = limef.DumpFrameFilter("dump") if args.dump else None
+    rtp        = limef.WebRTCMuxerFrameFilter("webrtc_muxer")
+    wrtc       = limef.WebRTCServerThread("webrtc", port=args.webrtc_port,
+                                          stack_size=200, fifo_size=400)
+    packetdump = limef.DumpFrameFilter("packetdump") if args.packetdump else None
+    dump       = limef.DumpFrameFilter("dump") if args.dump else None
+
+    chain = encoder.chain
     chain = chain.cc(packetdump) if packetdump else chain
     chain = chain.cc(rtp)
     if dump:
@@ -287,17 +320,16 @@ def main():
     else:
         rtp.cc(wrtc.getInput())
 
+    enc_name   = "H.264/NVENC" if args.hw_accel else "VP8/libvpx"
     player_url = f"http://localhost:{args.http_port}/?uuid={args.uuid}&wport={args.webrtc_port}"
     print("=================================")
     print("  WebRTC HTML Demo")
     print("=================================")
     if args.file:
         print(f"Source:      file  {args.file}")
-    elif args.rtsp:
-        print(f"Source:      rtsp  {args.rtsp}")
     else:
-        codec = "H.264/NVENC" if args.hw_accel else "VP8/libvpx"
-        print(f"Source:      usb   {args.usb}  {args.width}x{args.height}@{args.fps}  [{codec}]")
+        print(f"Source:      usb   {args.usb}  {args.width}x{args.height}@{args.fps}")
+    print(f"Encoder:     {enc_name}")
     print(f"Stream UUID: {stream_uuid}")
     print(f"WebRTC port: {args.webrtc_port}  (loopback)")
     print(f"HTTP port:   {args.http_port}")

@@ -764,28 +764,26 @@ Reads from an RTSP stream, a local media file, or a USB/V4L2 camera, muxes to
 RTP, and delivers it via WebRTC to any modern browser.  A `WebRTCServerThread`
 handles the ICE/SDP signaling over HTTP; an embedded nginx serves the static page.
 
-**Codec validation:**
+Sources and encoders are independent classes — pick one of each with `--file`/`--usb`
+and `--hw-accel`:
 
-`WebRTCMuxerFrameFilter` contains a `CodecAssertFrameFilter` as its first stage.
-WebRTC codec constraints are extremely strict (RFC 8834) — incompatible codecs
-trigger a warning and inutilize the filter chain.  No conversion is performed;
-the upstream pipeline must deliver the right codec.
+| Source | Encoder | Command |
+|--------|---------|---------|
+| `FileSource` | `VP8Encoder` | `--file PATH` |
+| `FileSource` | `CUDAEncoder` | `--file PATH --hw-accel` |
+| `USBCameraSource` | `VP8Encoder` | `--usb /dev/video0` |
+| `USBCameraSource` | `CUDAEncoder` | `--usb /dev/video0 --hw-accel` |
 
-| Video | Audio | Notes |
-|-------|-------|-------|
-| H264 | Opus / PCMU / PCMA / — | Baseline profile recommended for Firefox |
-| VP8 | Opus / PCMU / PCMA / — | Mandatory per RFC 8834 |
-| VP9 | Opus / — | Widely supported |
-| AV1 | Opus / — | Chrome 90+, Firefox 93+ |
-
-**Not accepted:** AAC, MP3, H.265 — not in the WebRTC spec; browsers reject them.
-For `--file` / `--rtsp` sources the stream must already carry a compatible codec.
-`--usb` sources encode to VP8/libvpx by default (mandatory per RFC 8834, no GPU
-needed), or H.264/NVENC with `--hw-accel`.  Both pass `CodecAssert`.
+`FileSource` always strips audio (`MuteAudioFrameFilter`) and decodes video before
+handing decoded frames to the encoder.  File source loops forever.
+`USBCameraSource` outputs raw YUYV422 frames; the encoder's `SwScaleFrameFilter`
+handles format conversion.  `WebRTCMuxerFrameFilter`'s internal
+`CodecAssertFrameFilter` validates the codec — VP8 is universally accepted by
+browsers (RFC 8834 mandatory); H.264 baseline (NVENC) works in Chrome and Firefox
+when OpenH264 is available.
 
 ```
 python3 apps/python/webrtc_html_demo.py --file PATH [options]
-python3 apps/python/webrtc_html_demo.py --rtsp URL  [options]
 python3 apps/python/webrtc_html_demo.py --usb  DEV  [--hw-accel] [options]
 ```
 
@@ -793,18 +791,17 @@ python3 apps/python/webrtc_html_demo.py --usb  DEV  [--hw-accel] [options]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--file PATH` | — | Local media file |
-| `--rtsp URL` | — | RTSP stream URL |
+| `--file PATH` | — | Local media file (decoded + re-encoded; audio muted) |
 | `--usb DEV` | — | V4L2 device, e.g. `/dev/video0` |
-| `--webrtc-port PORT` | 8090 | WebRTC signaling HTTP port (loopback only) |
-| `--http-port PORT` | 8091 | nginx static-file HTTP port |
+| `--hw-accel` | off | Use NVENC H.264 encoder instead of libvpx VP8 (GPU required) |
+| `--webrtc-port PORT` | 9090 | WebRTC signaling HTTP port (loopback only) |
+| `--http-port PORT` | 9091 | nginx static-file HTTP port |
 | `--uuid UUID` | `stream` | Stream UUID (exposed as `/<uuid>` on the signaling server) |
 | `--fps FPS` | 25 | Playback speed (file) or capture rate (USB) |
-| `--loop` | off | Loop file source |
 | `--width W` | 640 | USB capture width |
 | `--height H` | 480 | USB capture height |
-| `--bitrate BPS` | 4 000 000 | USB encoder bitrate |
-| `--hw-accel` | off | USB: NVENC H.264 instead of libvpx VP8 (software) |
+| `--bitrate BPS` | 4 000 000 | Encoder bitrate |
+| `--packetdump` | off | Log every packet before the WebRTC muxer (debug) |
 | `--dump` | off | Log every RTP packet leaving the muxer (debug) |
 | `--debug` | off | Set WebRTCServerThread log level to DEBUG (raw SDP exchange) |
 
@@ -813,25 +810,43 @@ python3 apps/python/webrtc_html_demo.py --usb  DEV  [--hw-accel] [options]
 ```mermaid
 flowchart TD
     fileTR[MediaFileTR]
-    liveTR[LiveStreamTR]
+    muteFF(MuteAudioFF)
+    decFF(DecFF)
     usbTR[USBCameraTR]
-    encff(EncFF H.264)
+    swVP8(SwScaleFF YUV420P)
+    encVP8(EncFF VP8)
+    swCUDA(SwScaleFF NV12)
+    encCUDA(EncFF H.264 NVENC)
     webrtcmux(WebRTCMuxerFF)
     wrtcsvr[WebRTCServerTR]
 
-    fileTR ---|PacketFrame| webrtcmux
-    liveTR ---|PacketFrame| webrtcmux
-    usbTR ---|DecodedFrame| encff
-    encff ---|PacketFrame H.264| webrtcmux
-    webrtcmux -->|SDPFrame + RTPFrames| wrtcsvr
+    fileTR --- muteFF
+    muteFF --- decFF
+    decFF --- swVP8
+    decFF --- swCUDA
+    usbTR --- swVP8
+    usbTR --- swCUDA
+    swVP8 --- encVP8
+    swCUDA --- encCUDA
+    encVP8 --- webrtcmux
+    encCUDA --- webrtcmux
+    webrtcmux -->|RTPFrames| wrtcsvr
 
     classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
     classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
-    class fileTR,liveTR,usbTR,wrtcsvr thread
-    class encff,webrtcmux ff
+    class fileTR,usbTR,wrtcsvr thread
+    class muteFF,decFF,swVP8,encVP8,swCUDA,encCUDA,webrtcmux ff
 ```
 
-`WebRTCMuxerFrameFilter` chains `CodecAssertFrameFilter` → `AnnexBFrameFilter`
-(converts H.264 AVCC to Annex B byte-stream format required by RTP) →
-`RTPMuxerFrameFilter`.  `WebRTCServerThread` handles ICE/STUN negotiation and
-SDP exchange with the browser; the static page is served by nginx on a separate port.
+Only one of the two encoder branches is active at runtime (`VP8Encoder` or
+`CUDAEncoder`).  `WebRTCMuxerFrameFilter` chains `CodecAssertFrameFilter` →
+`AnnexBFrameFilter` (H.264 AVCC → Annex B for RTP) → `RTPMuxerFrameFilter`.
+`WebRTCServerThread` handles ICE/STUN negotiation and SDP exchange; nginx serves
+the static page on a separate port.
+
+> **FrameFifo sizing:** the only thread boundary in this pipeline where packets
+> can be lost is `WebRTCServerThread`'s incoming `FrameFifo`.  Hardware encoders
+> (NVENC) emit packets in bursts — the default `stack_size=50, fifo_size=100` is
+> too small and causes periodic frame drops that show up as video jerkiness.
+> The demo uses `stack_size=200, fifo_size=400`; increase further if jitter
+> returns (e.g. at higher bitrates or slower machines).

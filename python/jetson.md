@@ -327,9 +327,10 @@ flowchart TD
 
 *File → SW decode → selectable encode → WebRTC → browser*
 
-Browser streaming companion to `jetson_rtsp.py`.  Reads a media file, decodes
-with FFmpeg SW, and re-encodes with one of three backends before serving via
-WebRTC.  nginx serves the player HTML on `--http-port`.
+Browser streaming companion to `jetson_rtsp.py`.  Reads a media file, strips
+audio with `MuteAudioFrameFilter`, decodes with FFmpeg SW, and re-encodes with
+one of three backends before serving via WebRTC.  nginx serves the player HTML
+on `--http-port`.
 
 | `--encoder` | Backend | Codec | Notes |
 |-------------|---------|-------|-------|
@@ -356,6 +357,23 @@ http://myjetson:9091/?myjetson:9090&uuid=stream
 http://laptop:9091/?myjetson:9090&uuid=stream
 ```
 
+### Modular class structure
+
+The script is built from independent source and encoder classes wired in `main()`:
+
+| Class | Pipeline |
+|-------|----------|
+| `FileSource` | `MediaFileThread → MuteAudioFrameFilter → DecodingFrameFilter` |
+| `V4L2Encoder` | `DecodedUploadFrameFilter → CUDAScaleFrameFilter(NV12) → EncodingFrameFilter(V4L2NVEncoder H.264)` |
+| `CUDAEncoder` | `DecodedUploadFrameFilter → CUDAScaleFrameFilter(NV12) → CudaToFFmpegFrameFilter → EncodingFrameFilter(h264_nvenc)` |
+| `VP8Encoder` | `SwScaleFrameFilter(YUV420P) → EncodingFrameFilter(libvpx VP8)` |
+
+`main()` wires them as:
+`FileSource → DumpFF(pre-enc) → <Encoder> → DumpFF(post-enc) → WebRTCMuxerFF → WebRTCServerThread`
+
+The `DumpFrameFilter` sentinels are always in the chain; verbose output is
+controlled by `--pre-dump` / `--post-dump` flags.
+
 ### V4L2 WebRTC encoder notes
 
 H.264 from the Jetson V4L2 NVENC driver requires two explicit control calls that
@@ -371,43 +389,104 @@ Both are set in `jetson_webrtc.py`; `extractH264Extradata()` in limef always
 populates `codec_params_->extradata` regardless of `global_header` so the SDP
 `sprop-parameter-sets` is always present.
 
-### Pipeline (v4l2 / cuda)
+### Pipeline (v4l2)
 
 ```mermaid
 flowchart TD
-    src[MediaFileThread]
-    sw_dec(DecodingFF\nFFmpeg SW · CPU YUV420P)
-    upload(DecodedUploadFF\nCPU YUV420P → CUDA)
-    to_nv12(CUDAScaleFF\nYUV420P → NV12)
-    encoder(EncodingFF\nV4L2NVEncoder H.264\nor FFmpeg CUDA NVENC)
+    subgraph FileSource
+        src[MediaFileThread]
+        mute(MuteAudioFF\nstrip audio tracks)
+        sw_dec(DecodingFF\nFFmpeg SW · CPU YUV420P)
+        src --- mute --- sw_dec
+    end
+    pre(DumpFF\npre-enc)
+    subgraph V4L2Encoder
+        upload(DecodedUploadFF\nCPU YUV420P → CUDA)
+        to_nv12(CUDAScaleFF\nYUV420P → NV12)
+        encoder(EncodingFF\nV4L2NVEncoder H.264 baseline)
+        upload --- to_nv12 --- encoder
+    end
+    post(DumpFF\npost-enc)
     rtp(WebRTCMuxerFF)
     wrtc[WebRTCServerThread]
 
-    src --- sw_dec --- upload --- to_nv12 --- encoder --- rtp --> wrtc
+    sw_dec --- pre --- upload
+    encoder --- post --- rtp --> wrtc
 
     classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
     classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
+    classDef opt    fill:#888,stroke:#555,color:#fff
     class src,wrtc thread
-    class sw_dec,upload,to_nv12,encoder,rtp ff
+    class mute,sw_dec,upload,to_nv12,encoder,rtp ff
+    class pre,post opt
+```
+
+### Pipeline (cuda)
+
+`CudaToFFmpegFrameFilter` wraps the raw `cudaMalloc` buffer in an
+`AVHWFramesContext` pool so NVENC's GPU-direct path (`nvenc_register_frame`)
+can consume it.  Without it, NVENC crashes on a null `hw_frames_ctx`.
+
+```mermaid
+flowchart TD
+    subgraph FileSource
+        src[MediaFileThread]
+        mute(MuteAudioFF\nstrip audio tracks)
+        sw_dec(DecodingFF\nFFmpeg SW · CPU YUV420P)
+        src --- mute --- sw_dec
+    end
+    pre(DumpFF\npre-enc)
+    subgraph CUDAEncoder
+        upload(DecodedUploadFF\nCPU YUV420P → CUDA)
+        to_nv12(CUDAScaleFF\nYUV420P → NV12)
+        to_ffmpeg(CudaToFFmpegFF\nCUDA → CUDA_FFMPEG\nadds hw_frames_ctx)
+        encoder(EncodingFF\nh264_nvenc baseline)
+        upload --- to_nv12 --- to_ffmpeg --- encoder
+    end
+    post(DumpFF\npost-enc)
+    rtp(WebRTCMuxerFF)
+    wrtc[WebRTCServerThread]
+
+    sw_dec --- pre --- upload
+    encoder --- post --- rtp --> wrtc
+
+    classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
+    classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
+    classDef opt    fill:#888,stroke:#555,color:#fff
+    class src,wrtc thread
+    class mute,sw_dec,upload,to_nv12,to_ffmpeg,encoder,rtp ff
+    class pre,post opt
 ```
 
 ### Pipeline (sw / VP8)
 
 ```mermaid
 flowchart TD
-    src[MediaFileThread]
-    sw_dec(DecodingFF\nFFmpeg SW · CPU YUV420P)
-    swscale(SwScaleFF\nensure YUV420P)
-    encoder(EncodingFF\nlibvpx VP8)
+    subgraph FileSource
+        src[MediaFileThread]
+        mute(MuteAudioFF\nstrip audio tracks)
+        sw_dec(DecodingFF\nFFmpeg SW · CPU YUV420P)
+        src --- mute --- sw_dec
+    end
+    pre(DumpFF\npre-enc)
+    subgraph VP8Encoder
+        swscale(SwScaleFF\nensure YUV420P)
+        encoder(EncodingFF\nlibvpx VP8)
+        swscale --- encoder
+    end
+    post(DumpFF\npost-enc)
     rtp(WebRTCMuxerFF)
     wrtc[WebRTCServerThread]
 
-    src --- sw_dec --- swscale --- encoder --- rtp --> wrtc
+    sw_dec --- pre --- swscale
+    encoder --- post --- rtp --> wrtc
 
     classDef thread fill:#4a90d9,stroke:#2c5f8a,color:#fff
     classDef ff     fill:#5ba85a,stroke:#3d6e3d,color:#fff
+    classDef opt    fill:#888,stroke:#555,color:#fff
     class src,wrtc thread
-    class sw_dec,swscale,encoder,rtp ff
+    class mute,sw_dec,swscale,encoder,rtp ff
+    class pre,post opt
 ```
 
 ---
