@@ -90,6 +90,20 @@ if (wportParam) sigPort = wportParam;
 const uuid    = "/" + (params.get("uuid") || "stream");
 const sigBase = `http://${sigHost}:${sigPort}`;
 
+// STUN server — off by default (works fine for Chrome / same-LAN use). Needed for
+// Firefox over Tailscale: Firefox filters 100.64.0.0/10 from ICE host candidates,
+// so without a STUN server reachable on the tailnet it never offers a usable
+// candidate (see limef-md/webrtc4.md). Opt in with ?stun=true, which reuses the
+// signaling host (coturn runs alongside jetson_webrtc.py) as the STUN server, or
+// give an explicit URL with ?stun=stun:host:port.
+let stunUrl = null;
+const stunParam = params.get("stun");
+if (stunParam === "true") {
+    stunUrl = `stun:${sigHost}:3478`;
+} else if (stunParam && stunParam !== "none" && stunParam !== "false") {
+    stunUrl = stunParam;
+}
+
 const MAX_LOG_LINES = 200;
 var log_lines = 0;
 
@@ -163,7 +177,7 @@ async function connect() {
         if (rtpmapLine) log("log-info", `offer rtpmap: ${rtpmapLine}`);
 
         // 2. Create peer connection and wire up track → video
-        pc = new RTCPeerConnection();
+        pc = new RTCPeerConnection(stunUrl ? { iceServers: [{ urls: stunUrl }] } : undefined);
 
         pc.ontrack = (ev) => {
             log("log-ok", `track received: kind=${ev.track.kind}  readyState=${ev.track.readyState}  streams=${ev.streams.length}`);
@@ -302,7 +316,7 @@ function startStatsTicker() {
 // ── startup ───────────────────────────────────────────────────────────────────
 
 window.onload = () => {
-    log("log-info", `page loaded  uuid=${uuid}  signaling=${sigBase}  (page host: ${window.location.hostname})`);
+    log("log-info", `page loaded  uuid=${uuid}  signaling=${sigBase}  stun=${stunUrl || "disabled"}  (page host: ${window.location.hostname})`);
     setStatus("ready — click Connect to start");
 };
 </script>

@@ -295,7 +295,14 @@ def main():
                         "filters 100.64.0.0/10 from ICE host candidates, so "
                         "without a STUN server reachable on the tailnet it never "
                         "offers its Tailscale address and ICE fails. The STUN "
-                        "server itself must already be running at that address.")
+                        "server itself must already be running at that address. "
+                        "Use a literal IP or the full Tailscale FQDN (e.g. "
+                        "host.tailXXXX.ts.net) — NOT the bare Tailscale hostname: "
+                        "/etc/hosts resolves that to 127.0.1.1 before DNS search "
+                        "domains ever apply, so ICE gathering silently times out. "
+                        "This only sets up the server side — the browser page also "
+                        "needs '&stun=true' in its URL (or '&stun=<url>' for a "
+                        "custom one) to actually use it, see webrtc_html_demo/static/index.html.")
     args = p.parse_args()
 
     if not os.path.exists(args.file):
@@ -353,20 +360,26 @@ def main():
     print(f"HTTP port:    {hport}")
     print(f"LAN IP:       {lan_ip}")
     print(f"STUN server:  {args.stun if args.stun else 'disabled'}")
+    # The browser only uses the STUN server configured above (on the Jetson side)
+    # if the page URL also carries &stun=true — see index.html. Reflect that in
+    # every example URL below so it's not forgotten mid-session.
+    stun_qs = "&stun=true" if args.stun else ""
+    if args.stun:
+        print("              (browser page needs '&stun=true' in its URL to use this — see below)")
     print()
     print("Open in browser on THIS machine:")
-    print(f"  http://localhost:{hport}/?{lan_ip}:{wport}&uuid={args.uuid}")
+    print(f"  http://localhost:{hport}/?{lan_ip}:{wport}&uuid={args.uuid}{stun_qs}")
     print()
     print("Open from a REMOTE machine (HTML served from this host):")
-    print(f"  http://{lan_ip}:{hport}/?{lan_ip}:{wport}&uuid={args.uuid}")
+    print(f"  http://{lan_ip}:{hport}/?{lan_ip}:{wport}&uuid={args.uuid}{stun_qs}")
     print()
     print("Open from a REMOTE machine (HTML served elsewhere, stream from here):")
-    print(f"  http://<static-host>:<port>/?{lan_ip}:{wport}&uuid={args.uuid}")
+    print(f"  http://<static-host>:<port>/?{lan_ip}:{wport}&uuid={args.uuid}{stun_qs}")
     print("  (replace LAN IP with Tailscale hostname if using VPN)")
     print()
     print("To serve HTML from your local machine instead of this host:")
     print(f"  python3 -m http.server {hport} --directory {_STATIC_DIR}")
-    print(f"  then open: http://localhost:{hport}/?{lan_ip}:{wport}&uuid={args.uuid}")
+    print(f"  then open: http://localhost:{hport}/?{lan_ip}:{wport}&uuid={args.uuid}{stun_qs}")
     print("==============================================")
     print("Press Ctrl+C to stop\n")
 
