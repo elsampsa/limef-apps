@@ -206,7 +206,7 @@ int main(int argc, char** argv) {
 
     // --- 9. RTSP Server ---
     FrameFifoContext rtsp_ctx(false, 5, 100);
-    Limef::rtsp::RTSPServerThread rtsp_server("rtsp-server", rtsp_ctx, port);
+    Limef::rtsp::RTSPServerThread rtsp_server("rtsp-server", rtsp_ctx, Limef::rtsp::RTSPServerContext{port});
 
     // --- Debug: dump filters (uncomment wiring below to enable) ---
     DumpFrameFilter dump_after_camera("DUMP-after-camera");

@@ -138,7 +138,7 @@ int main(int argc, char** argv) {
     Limef::rtsp::RTSPServerThread rtsp_server(
         "rtsp_server",
         FrameFifoContext(false, 5, 100),
-        port
+        Limef::rtsp::RTSPServerContext{port}
     );
 
     // Connect filterchain: mediafile -> rtp_muxer -> rtsp_server
