@@ -181,6 +181,10 @@ def main():
 
     gauss_kernel    = [None]
     warned_cpu_push = [False]
+    # Reused across iterations instead of a fresh limef.TensorFrame() per frame:
+    # reserve_gpu_plane() only cudaMalloc's when the requested size grows, so with
+    # a constant (C, H, W) this becomes a cheap metadata rewrite after frame 1.
+    out_frame       = [None]
 
     def consumer():
         while not stop_event.is_set():
@@ -214,7 +218,9 @@ def main():
                     t.unsqueeze(0), gauss_kernel[0], padding=7, groups=C
                 ).squeeze(0).clamp(0, 255).to(torch.uint8)
 
-                out = limef.TensorFrame()
+                if out_frame[0] is None:
+                    out_frame[0] = limef.TensorFrame()
+                out = out_frame[0]
                 out.reserve_gpu_plane(0, [C, H, W], 'uint8')
                 torch.from_dlpack(out.planes[0]).copy_(blurred)
                 out.timestamp = frame.timestamp

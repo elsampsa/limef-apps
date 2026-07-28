@@ -194,6 +194,16 @@ class GPUBlock:
         self.p2.getOutput().cc(self.output)
         self.switch.toggle(0)
 
+        # Reused across iterations (see _run_p1/_run_p2): push() drives the
+        # downstream chain synchronously and returns only after TensorThread's
+        # input fifo has cudaMemcpy'd the data into its own stack frame, so it's
+        # safe to overwrite this frame's GPU buffer on the next loop pass.
+        # reserve_gpu_plane() only reallocates (cudaMalloc) when the requested
+        # size grows — same shape every frame here, so after the first call it's
+        # just a cheap metadata rewrite instead of a cudaFree+cudaMalloc per frame.
+        self._out1 = limef.TensorFrame()
+        self._out2 = limef.TensorFrame()
+
         self._t1 = threading.Thread(target=self._run_p1, daemon=True,
                                     name=f"{name}_p1")
         self._t2 = threading.Thread(target=self._run_p2, daemon=True,
@@ -214,12 +224,12 @@ class GPUBlock:
                 self._c1.push(frame)
                 continue
             # planes[0] is a DLPack capsule for GPU frames.
-            # Clone via torch before modifying; write into a new owned TensorFrame.
+            # Clone via torch before modifying; write into the reused output TensorFrame.
             t = torch.from_dlpack(frame.planes[0]).clone()  # (3,H,W) uint8 CUDA
             C, H, W = t.shape
             t[0] = 0   # zero red
             t[1] = 0   # zero green  → only blue remains
-            out = limef.TensorFrame()
+            out = self._out1
             out.reserve_gpu_plane(0, [C, H, W], 'uint8')
             torch.from_dlpack(out.planes[0]).copy_(t)
             out.timestamp = frame.timestamp
@@ -246,7 +256,7 @@ class GPUBlock:
                    .to(torch.uint8)
                    .expand(3, -1, -1)
                    .contiguous())
-            out = limef.TensorFrame()
+            out = self._out2
             out.reserve_gpu_plane(0, [C, H, W], 'uint8')
             torch.from_dlpack(out.planes[0]).copy_(bw)
             out.timestamp = frame.timestamp
