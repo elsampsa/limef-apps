@@ -340,6 +340,10 @@ def main():
     # ── start WebRTC server ────────────────────────────────────────────────────
     if args.debug:
         wrtc.setLogLevel(limef.LOG_LEVEL_DEBUG)
+    # Forward browser keyframe requests (PLI) to the encoder. Single-slot demo,
+    # so no slot→encoder lookup is needed — a multi-stream app would keep a
+    # {slot: EncodingFrameFilter} dict here instead.
+    wrtc.onKeyframeRequested(lambda slot: encoder.chain.requestKeyFrame())
     wrtc.start()
     wrtc.expose(SLOT, stream_uuid)
 
