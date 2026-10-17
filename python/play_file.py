@@ -35,7 +35,7 @@ Press Ctrl+C to stop.
 import time
 import argparse
 
-import limef
+import limef.core as limef
 
 
 _DECODE_MAP = {

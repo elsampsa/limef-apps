@@ -39,7 +39,7 @@ import select
 import argparse
 import threading
 
-import limef
+import limef.core as limef
 
 sys.stdout.reconfigure(line_buffering=True)
 

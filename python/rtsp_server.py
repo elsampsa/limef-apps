@@ -31,7 +31,7 @@ import argparse
 import threading
 from pathlib import Path
 
-import limef
+import limef.core as limef
 import numpy as np
 
 try:

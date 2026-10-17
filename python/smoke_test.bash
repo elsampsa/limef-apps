@@ -145,8 +145,8 @@ echo "limef Python apps smoke test"
 echo "============================"
 echo ""
 
-if ! python3 -c "import limef" 2>/dev/null; then
-    echo "ERROR: 'import limef' failed.  Source go_debug.bash first."
+if ! python3 -c "import limef.core" 2>/dev/null; then
+    echo "ERROR: 'import limef.core' failed.  Source go_debug.bash first."
     exit 1
 fi
 

@@ -48,7 +48,7 @@ import time
 import argparse
 import threading
 
-import limef
+import limef.core as limef
 
 try:
     import torch

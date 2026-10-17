@@ -32,7 +32,7 @@ Runtime switching (from an interactive Python session or a second thread):
 import time
 import sys
 import argparse
-import limef
+import limef.core as limef
 
 VERBOSE_INTERVAL = 20   # TensorThreads log frame count every N frames
 

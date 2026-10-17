@@ -70,7 +70,7 @@ import tempfile
 import subprocess
 import pathlib
 
-import limef
+import limef.core as limef
 
 SLOT = 1
 

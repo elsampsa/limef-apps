@@ -20,7 +20,7 @@ Usage:
 import sys
 import time
 import argparse
-import limef
+import limef.core as limef
 
 sys.stdout.reconfigure(line_buffering=True)
 

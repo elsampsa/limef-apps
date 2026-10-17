@@ -38,7 +38,7 @@ import argparse
 import threading
 
 import numpy as np
-import limef
+import limef.core as limef
 
 try:
     import torch

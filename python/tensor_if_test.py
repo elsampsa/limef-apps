@@ -23,7 +23,7 @@ import time
 import argparse
 import threading
 
-import limef
+import limef.core as limef
 
 _SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
 _FIXTURE_FILE = os.path.join(_SCRIPT_DIR, '../../fixtures/jontxu.mkv')
