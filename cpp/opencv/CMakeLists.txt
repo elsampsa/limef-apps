@@ -64,6 +64,8 @@ if(NOT OPENCV_INSTALL)
 endif()
 set(OPENCV_INCLUDE_DIR "${OPENCV_INSTALL}/include/opencv4")
 set(OPENCV_LIB_DIR     "${OPENCV_INSTALL}/lib")
+# OpenCV libs are linked by full path: a bare -lopencv_core would resolve to the system OpenCV whenever a
+# -L/usr/lib/<arch> from pkg-config (x11, glew, ..) comes first on the link line (e.g. JetPack's OpenCV 4.8)
 
 set(COMMON_INCLUDES
     ${LIMEF_PREFIX}/include              # for "limef/xxx.h" includes
@@ -91,12 +93,11 @@ function(add_limef_app name)
         ${COMMON_LIBS}
         "-L${LIMEF_PREFIX}/lib"
         "Limef.so"
-        "-L${OPENCV_LIB_DIR}"
-        opencv_core
-        opencv_cudaarithm
-        opencv_cudafilters
-        opencv_cudev
-        opencv_imgproc
+        "${OPENCV_LIB_DIR}/libopencv_core.so"
+        "${OPENCV_LIB_DIR}/libopencv_cudaarithm.so"
+        "${OPENCV_LIB_DIR}/libopencv_cudafilters.so"
+        "${OPENCV_LIB_DIR}/libopencv_cudev.so"
+        "${OPENCV_LIB_DIR}/libopencv_imgproc.so"
         CUDA::cudart
     )
 endfunction()
