@@ -423,6 +423,66 @@ flowchart TD
 
 ---
 
+## usb_av.py
+
+*USB webcam + ALSA microphone → one RTSP stream: VP9 video + Opus audio*
+
+A hardware demo (needs a V4L2 camera and an ALSA capture device).  The video and the audio are
+captured by threads of their own, both write into the same `CombineFrameFilter`, which announces
+one stream with a video and an audio track; then `RTSPMuxerFrameFilter` → `RTSPServerThread`.
+If the microphone is absent or busy, the video starts anyway after `--wait-ms` and the audio joins
+in when the device appears (`AvDeviceThread` retries with a backoff).
+
+The microphone is opened as a native `hw:` device (find it with `arecord -l`): stereo, 48 kHz for
+most USB cameras.  Do not use `plughw:` — the resampler plugin of libasound crashes on some systems.
+
+```
+python3 apps/python/usb_av.py [--video-device /dev/video0] [--audio-device hw:2,0]
+                              [--width 640] [--height 480] [--fps 30]
+                              [--bitrate 1500000] [--audio-bitrate 64000]
+                              [--wait-ms 2000] [--port 8554] [--duration SECS]
+```
+
+Watch it with `ffplay -strict experimental -rtsp_transport tcp rtsp://localhost:8554/live/stream`
+(ffmpeg treats the RTP payload format of VP9 as experimental).  To record it with ffmpeg, add
+`-copyinkf`: the VP9 depacketizer doesn't flag keyframes, and `-c copy` otherwise drops
+everything until a keyframe.
+
+Both tracks start at pts 0 with their own first packet, so there can be a constant A/V offset of the
+size of the difference between the start times of the two devices.
+
+### Pipeline
+
+```mermaid
+flowchart TD
+    cam[USBCameraThread]
+    scale(SwScale YUV420P)
+    venc(Encoding VP9)
+    mic[AvDeviceThread alsa]
+    events(InfoFrameFilter)
+    opus(AudioTranscode Opus)
+    comb(CombineFrameFilter)
+    rtpmux(RTSPMuxer)
+    rtsp[RTSPServerThread]
+
+    cam --- scale
+    scale --- venc
+    venc --- comb
+    mic --- events
+    events --- opus
+    opus --- comb
+    comb --- rtpmux
+    rtpmux --- rtsp
+
+    classDef thread fill:#f9f,stroke:#333
+    classDef ff fill:#bbf,stroke:#333
+    class cam,mic,rtsp thread
+    class scale,venc,events,opus,comb,rtpmux ff
+```
+
+
+---
+
 ## usb_info.py
 
 *USB camera → TensorPythonInterface → InfoFrame message channel*
